@@ -1,0 +1,8 @@
+mitmproxy==12.2.0
+Pillow==12.0.0
+psutil==7.1.1
+pyside6==6.10.0
+pyside6_addons==6.10.0
+pyside6_essentials==6.10.0
+pywin32==311
+Requests==2.32.5
