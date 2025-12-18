@@ -1,6 +1,3 @@
-# SubplaceJoiner_Qt.py (patched v2)
-# PySide6 UI + join flow fixes + persistence fixes
-
 import uuid
 import json
 from PySide6.QtCore import QObject, Signal, Qt, QTimer
@@ -19,13 +16,15 @@ import stat
 import ctypes
 import struct
 import socket
+import gzip
 from urllib.parse import urlparse, urlunparse
 from ctypes import wintypes
 from datetime import datetime, timezone
 from pathlib import Path
 from io import BytesIO
+from shiboken6 import isValid
 
-# --- ensure Requests ignores system proxies to avoid hangs ---
+# ensure Requests ignores system proxies to avoid hangs
 
 import requests
 import asyncio
@@ -55,17 +54,17 @@ try:
 except Exception:
     win32crypt = None
 
-from PySide6.QtCore import Qt, QSize, QEvent, QTimer, QRectF, Signal, QObject
+from PySide6.QtCore import Qt, QSize, QEvent, QTimer, QRectF, Signal, QObject, QThread
 from PySide6.QtGui import QFont, QPalette, QColor, QFontMetrics, QPainter, QPixmap, QImage, QPen
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
     QHBoxLayout, QVBoxLayout, QGridLayout, QScrollArea, QSplitter, QCheckBox,
     QFrame, QSizePolicy, QGraphicsDropShadowEffect, QMenu, QTextEdit,
     QColorDialog, QSlider, QWidgetAction, QSplitterHandle, QTabWidget, QTabBar,
-    QDialog, QDialogButtonBox
+    QDialog, QDialogButtonBox, QInputDialog, QMessageBox, QFileDialog, QComboBox
 )
 
-# ==================== GLOBAL VARIBLES ====================
+# GLOBAL VARIBLES
 
 PROXY = None
 ENABLE_GAME_JOIN_INTERCEPT = False
@@ -75,54 +74,122 @@ LAST_accessCode = None
 LAST_placeId = None
 LAST_jobId = None
 
-# ==================== ADMIN ====================
+
+DELAY_REQUESTS = False
+DELAY_REQUESTS_LIST = {}
+CURRENT_FILTER = "All"
+
+CACHES_BY_SOURCE = {}
+CACHELOGS = {}
+
+
+asset_types = {
+    1: "Image",
+    2: "TShirt",
+    3: "Audio",
+    4: "Mesh",
+    5: "Lua",
+    8: "Hat",
+    9: "Place",
+    10: "Model",
+    11: "Shirt",
+    12: "Pants",
+    13: "Decal",
+    17: "Head",
+    18: "Face",
+    19: "Gear",
+    21: "Badge",
+    24: "Animation",
+    27: "Torso",
+    28: "RightArm",
+    29: "LeftArm",
+    30: "LeftLeg",
+    31: "RightLeg",
+    32: "Package",
+    34: "GamePass",
+    38: "Plugin",
+    40: "MeshPart",
+    41: "HairAccessory",
+    42: "FaceAccessory",
+    43: "NeckAccessory",
+    44: "ShoulderAccessory",
+    45: "FrontAccessory",
+    46: "BackAccessory",
+    47: "WaistAccessory",
+    48: "ClimbAnimation",
+    49: "DeathAnimation",
+    50: "FallAnimation",
+    51: "IdleAnimation",
+    52: "JumpAnimation",
+    53: "RunAnimation",
+    54: "SwimAnimation",
+    55: "WalkAnimation",
+    56: "PoseAnimation",
+    57: "EarAccessory",
+    58: "EyeAccessory",
+    61: "EmoteAnimation",
+    62: "Video",
+    64: "TShirtAccessory",
+    65: "ShirtAccessory",
+    66: "PantsAccessory",
+    67: "JacketAccessory",
+    68: "SweaterAccessory",
+    69: "ShortsAccessory",
+    70: "LeftShoeAccessory",
+    71: "RightShoeAccessory",
+    72: "DressSkirtAccessory",
+    73: "FontFamily",
+    76: "EyebrowAccessory",
+    77: "EyelashAccessory",
+    78: "MoodAnimation",
+    79: "DynamicHead",
+    88: "FaceMakeup",
+    89: "LipMakeup",
+    90: "EyeMakeup",
+}
+
+# ADMIN
 
 
 def ensure_admin_in_powershell():
     try:
+        # Check admin privilege
         is_admin = ctypes.windll.shell32.IsUserAnAdmin()
-    except Exception:
+    except:
         is_admin = False
 
     if not is_admin:
         print("Requesting Administrator PowerShell...")
 
-        # Absolute path to current script
+        # Absolute path of current script
         script = os.path.abspath(sys.argv[0])
 
-        # Properly quote all arguments for PowerShell
-        args = " ".join(shlex.quote(a) for a in sys.argv[1:])
+        # Include arguments passed to this script
+        params = " ".join([f'"{arg}"' for arg in sys.argv[1:]])
 
-        # Escape double quotes for PowerShell
-        py_path = script.replace('"', '`"')
-        exe_path = sys.executable.replace('"', '`"')
+        # Build PowerShell command line
+        ps_command = f'& "{sys.executable}" "{script}" {params}'
 
-        # Construct a fully escaped PowerShell command
-        # Using call operator (&) and enclosing everything in single quotes
-        ps_command = f"& '{exe_path}' '{py_path}' {args}"
-
-        # Wrap the command inside quotes to protect spaces and special characters
-        full_command = f'-ExecutionPolicy Bypass -Command "{ps_command}"'
-
+        # Path to 64-bit PowerShell
         powershell_exe = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
         # Launch elevated PowerShell
         ctypes.windll.shell32.ShellExecuteW(
             None,
-            "runas",
+            "runas",  # triggers UAC
             powershell_exe,
-            full_command,
+            f'-NoExit -Command {ps_command}',
             None,
             1
         )
 
-        sys.exit(0)
+        sys.exit(0)  # Exit the non-admin instance
 
 
 ensure_admin_in_powershell()
 
 
-# ==================== Theming helpers ====================
+# Theming helpers
 
 
 def _safe_set_dpi_policy():
@@ -340,7 +407,7 @@ def set_app_palette(app, theme):
     app.setPalette(pal)
 
 
-# ---------------- custom splitter ----------------
+# custom splitter
 HANDLE_HIT = 10
 HANDLE_LINE = 2
 HANDLE_GUTTER = (HANDLE_HIT - HANDLE_LINE) // 2
@@ -370,7 +437,7 @@ class ThinSplitter(QSplitter):
     def createHandle(self):
         return ThinHandle(self.orientation(), self)
 
-# ---------------- micro-widgets ----------------
+# micro-widgets
 
 
 class Card(QFrame):
@@ -551,7 +618,7 @@ class FlowScroll(QScrollArea):
             self._flow.reflow()
         return super().eventFilter(obj, event)
 
-# ---------------- PlaceCard with callbacks & async thumbnail ----------------
+# PlaceCard with callbacks & async thumbnail
 
 
 class PlaceCard(QFrame):
@@ -653,7 +720,7 @@ class PlaceCard(QFrame):
         except Exception:
             return iso_time
 
-# -------- collapsible hero --------
+# collapsible hero
 
 
 class CollapsibleHero(Card):
@@ -735,7 +802,7 @@ class CollapsibleHero(Card):
         self._chev.setText("▾" if self._expanded else "▸")
 
 
-# ==================== Main Window ====================
+# Main Window
 
 
 class _MainThreadInvoker(QObject):
@@ -756,15 +823,14 @@ class _MainThreadInvoker(QObject):
             traceback.print_exc()
 
 
-class FFlagWarningDialog(QDialog):
+class CacheWarningDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("FastFlag Editor Warning")
+        self.setWindowTitle("Cache Editing Warning")
         self.setWindowFlags(Qt.Dialog | Qt.WindowTitleHint)
         self.setModal(True)
         self.setFixedSize(400, 200)
 
-        # Apply the same styling as the main app
         self.setStyleSheet(gen_styles())
 
         layout = QVBoxLayout(self)
@@ -782,7 +848,8 @@ class FFlagWarningDialog(QDialog):
         warning_layout.addWidget(icon_label)
 
         # Warning text
-        warning_text = QLabel("This can get you banned if you are not careful")
+        warning_text = QLabel(
+            "This can get you banned from some games if you are not careful")
         warning_text.setObjectName("CardTitle")
         warning_text.setWordWrap(True)
         warning_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -796,7 +863,7 @@ class FFlagWarningDialog(QDialog):
 
         # Additional info
         info_text = QLabel(
-            "FastFlags can modify Roblox behavior in ways that may violate Terms of Service. Use at your own risk.")
+            "Some games could flag you with their anti-cheat systems if your modified caches are too abusive or blatant.")
         info_text.setObjectName("Caption")
         info_text.setWordWrap(True)
         layout.addWidget(info_text)
@@ -825,22 +892,21 @@ class FFlagWarningDialog(QDialog):
 class Window(QMainWindow):
     def __init__(self):
         super().__init__()
-        # Ensure queued UI callbacks run
         self._invoker = _MainThreadInvoker(self)
 
-        self.setWindowTitle("Hopr — Advanced Roblox Tools")
+        self.setWindowTitle("Hopr — Super cool thingaling👽")
         self.resize(1280, 820)
         self.setMinimumSize(780, 560)
-        # state
         self._text_color = None
         self._btn_color = None
         self._card_width = 300
         self._theme = "dark"
         self._cards = []
         self.root_place_id = None
-        self.thumb_cache = {}  # place_id -> PIL Image
-        self._current_places = []  # Store current places for sorting
-        self._sort_option = "place_id_asc"  # Default sort option
+        self.thumb_cache = {}
+        self._current_places = []
+        self._results_gen = 0
+        self._sort_option = "place_id_asc"
 
         # Use same settings path as Tk app for compatibility
         self.settings_path = Path.home() / "AppData/Local/SubplaceJoiner/settings.json"
@@ -852,15 +918,15 @@ class Window(QMainWindow):
         self._proxy_ready = False
         self._search_inflight = False
         self._search_watchdog = None
-        self._show_fflag_warning = True  # New setting for warning
-        self._fflag_warning_shown = False  # Track if warning was shown this session
+        self._show_cache_warning = True
+        self._cache_warning_shown = False
         self._apply_theme(self._theme)
         self._build()
         self._apply_styles()
         self._load_settings()
         self._refresh_recents_and_favs()
 
-    # ---------- Theme ----------
+    # Theme
     def _apply_theme(self, theme):
         app = QApplication.instance()
         app.setStyle("Fusion")
@@ -869,7 +935,7 @@ class Window(QMainWindow):
     def _apply_styles(self):
         self.setStyleSheet(gen_styles(self._text_color, self._btn_color))
 
-    # ---------- UI build ----------
+    # UI build
     def _build(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -884,11 +950,11 @@ class Window(QMainWindow):
         hopr_content = self._build_hopr_content()
         self.tab_widget.addTab(hopr_content, "Hopr")
 
+        # Cache Editing tab --- muehehhehe 🤫
+        cache_editing_widget = CacheEditingWidget()
+        self.tab_widget.addTab(cache_editing_widget, "Cache Editing 👽")
 
-        fflag_editor_widget = FFlagEditorWidget()
-        self.tab_widget.addTab(fflag_editor_widget, "FastFlag Editor")
-
-        # NEW: Random Stuff tab
+        # Random Stuff tab
         random_stuff_widget = RandomStuffWidget()
         self.tab_widget.addTab(random_stuff_widget, "Random Stuff")
 
@@ -934,15 +1000,22 @@ class Window(QMainWindow):
         self.search.returnPressed.connect(lambda: self.on_search_clicked())
         self.fav_btn.clicked.connect(self.on_toggle_favorite)
         search_card.body().addLayout(srow)
-        cookie_row = QHBoxLayout()
-        cookie_row.setSpacing(10)
-        self.cookie_edit = Search(".ROBLOSECURITY cookie (optional)")
-        self.cookie_edit.setEchoMode(QLineEdit.Password)
-        cookie_row.addWidget(self.cookie_edit, 2)
-        self.cookie_toggle = GhostButton("Show")
-        self.cookie_toggle.clicked.connect(self.on_toggle_cookie)
-        cookie_row.addWidget(self.cookie_toggle)
-        search_card.body().addLayout(cookie_row)
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(10)
+        self.subplace_filter = Search("Filter subplaces (name or ID)…")
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.timeout.connect(
+            lambda: self._apply_subplace_filter(self.subplace_filter.text())
+        )
+        self.subplace_filter.textChanged.connect(
+            lambda: self._filter_timer.start(120))
+        filter_row.addWidget(self.subplace_filter, 2)
+        self.clear_filter_btn = GhostButton("Clear")
+        self.clear_filter_btn.clicked.connect(
+            lambda: self.subplace_filter.setText(""))
+        filter_row.addWidget(self.clear_filter_btn)
+        search_card.body().addLayout(filter_row)
         self.error_lbl = QLabel("")
         self.error_lbl.setObjectName("Caption")
         search_card.body().addWidget(self.error_lbl)
@@ -1045,14 +1118,12 @@ class Window(QMainWindow):
         main_split.addWidget(left_wrap)
         main_split.addWidget(self.right_wrap)
         main_split.setSizes([320, 900])
-        # Fix: setCollapsible after widgets are added
         main_split.setCollapsible(0, True)
         self.main_split = main_split
         self.main_split.splitterMoved.connect(
             lambda *_: (self._snap_left_closed(), self._apply_collapse_margin()))
         outer.addWidget(self.main_split, 1)
         self.grid_host.installEventFilter(self)
-        # footer
         foot = QHBoxLayout()
         self.status = QLabel("Ready.")
         self.status.setObjectName("Caption")
@@ -1065,7 +1136,7 @@ class Window(QMainWindow):
 
         return content_widget
 
-    # ---------- Event/layout helpers ----------
+    # Event/layout helpers
     def eventFilter(self, obj, event):
         if obj is self.grid_host and event.type() == QEvent.Resize:
             self._reflow_grid()
@@ -1083,6 +1154,14 @@ class Window(QMainWindow):
         for i, w in enumerate(widgets):
             self.grid.addWidget(w, i // cols, i % cols)
 
+    def _clear_results_grid(self):
+        while self.grid.count():
+            it = self.grid.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
     def _scale_thumbs(self):
         scale = max(0.55, min(1.45, (self._card_width / 300.0)))
         for i in range(self.grid.count()):
@@ -1090,7 +1169,6 @@ class Window(QMainWindow):
             w = item.widget()
             if isinstance(w, PlaceCard):
                 w.set_thumb_scale(scale)
-                # Re-apply thumbnail at new size if it exists
                 place_id = w.place.get('id')
                 if place_id in self.thumb_cache:
                     pix = self._pil_to_qpix(self.thumb_cache[place_id])
@@ -1119,7 +1197,7 @@ class Window(QMainWindow):
             right = max(1, total - self.main_split.handleWidth())
             self.main_split.setSizes([0, right])
 
-    # ---------- Settings callbacks ----------
+    # Settings callbacks
     def _on_theme(self, key):
         self._theme = 'dark' if key in ('system', 'dark') else 'light'
         self._apply_theme(self._theme)
@@ -1151,7 +1229,7 @@ class Window(QMainWindow):
         self.rec_flow.setTargetWidth(tw)
         self.fav_flow.setTargetWidth(tw)
 
-    # ---------- Search / Results ----------
+    # Search / Results
     def on_search_clicked(self, *_):
         if self._search_inflight:
             print("[SEARCH] ignored: already running")
@@ -1165,14 +1243,12 @@ class Window(QMainWindow):
         self.search_btn.setEnabled(False)
         self.search_btn.setText("Searching…")
         self._search_inflight = True
-        # history update (always persist)
         if place_id in self.recent_ids:
             self.recent_ids.remove(place_id)
         self.recent_ids.insert(0, place_id)
         self._save_settings(force=True)
         self._refresh_recents_and_favs()
         print(f"[SEARCH] start place={place_id}")
-        # watchdog: auto-unstick UI after 15s
         try:
             if self._search_watchdog is not None:
                 self._search_watchdog.stop()
@@ -1237,7 +1313,7 @@ class Window(QMainWindow):
                     p["created"] = None
                     p["updated"] = None
 
-                    # Mark root place - now using the actual root place ID
+                    # Mark root place
                     if self.root_place_id and int(pid) == int(self.root_place_id):
                         p["is_root"] = True
 
@@ -1258,7 +1334,7 @@ class Window(QMainWindow):
                 len(all_places)), self.display_results(all_places.copy())))
 
             # Now load timestamps asynchronously in background
-            cookie = self.cookie_edit.text().strip() or self.get_roblosecurity() or ""
+            cookie = self.get_roblosecurity() or ""
 
             def load_timestamps():
                 updated_places = []
@@ -1337,18 +1413,15 @@ class Window(QMainWindow):
             print("[DEBUG] failed to update debug label", e)
 
     def display_results(self, places):
+
+        self._results_gen += 1
+        gen = self._results_gen
+
         # Store places for sorting
         self._current_places = places.copy() if places else []
 
         # Sort and display
-        if not places:
-            while self.grid.count():
-                it = self.grid.takeAt(0)
-                w = it.widget()
-                if w:
-                    w.setParent(None)
-            self.status.setText("No places found.")
-            return
+        self._clear_results_grid()
 
         if isinstance(places, dict):
             places = [places]
@@ -1358,11 +1431,7 @@ class Window(QMainWindow):
         sorted_places = self._sort_places(places)
 
         # Clear and display
-        while self.grid.count():
-            it = self.grid.takeAt(0)
-            w = it.widget()
-            if w:
-                w.setParent(None)
+        self._clear_results_grid()
 
         cols = max(1, max(1, self.grid_host.width() // self._card_width))
         for i, p in enumerate(sorted_places):
@@ -1376,21 +1445,19 @@ class Window(QMainWindow):
             card = PlaceCard(p, on_join=self.join_flow,
                              on_open=self.open_in_browser)
             self.grid.addWidget(card, i // cols, i % cols)
-            # Start thumbnail loading immediately for each card
-            self._load_thumb_async_immediate(p.get('id'), card)
+            self._load_thumb_async_immediate(p.get('id'), card, gen)
         self._reflow_grid()
         self._scale_thumbs()
         self.status.setText(f"Found {len(places)} places")
 
-    def _load_thumb_async_immediate(self, place_id, card: PlaceCard):
-        """Load thumbnail immediately without waiting"""
+    def _load_thumb_async_immediate(self, place_id, card: PlaceCard, gen: int):
         def worker():
             try:
                 pix = self._fetch_thumb_pixmap(place_id)
-                self._on_main(lambda: self._apply_thumb(card, pix))
+                self._on_main(lambda: self._apply_thumb(card, pix, gen))
             except Exception as e:
                 print(f"[THUMB] Error loading thumbnail for {place_id}: {e}")
-                self._on_main(lambda: card.thumb.setText("(no image)"))
+                self._on_main(lambda: self._apply_thumb(card, None, gen))
         threading.Thread(target=worker, daemon=True).start()
 
     def _search_timeout(self):
@@ -1461,20 +1528,20 @@ class Window(QMainWindow):
             self._display_sorted_places(sorted_places)
 
     def _on_tab_changed(self, index):
-        """Handle tab change - show FastFlag warning if needed"""
-        # Check if we're switching to the FastFlag Editor tab (index 2)
-        if index == 1 and self._show_fflag_warning and not self._fflag_warning_shown:
-            self._show_fflag_warning_dialog()
+        """Handle tab change - show Cache warning if needed"""
+        # Check if we're switching to the Cache Editor tab (index 1)
+        if index == 1 and self._show_cache_warning and not self._cache_warning_shown:
+            self._show_cache_warning_dialog()
 
-    def _show_fflag_warning_dialog(self):
-        """Show the FastFlag warning dialog"""
-        dialog = FFlagWarningDialog(self)
+    def _show_cache_warning_dialog(self):
+        """Show the Cache warning dialog"""
+        dialog = CacheWarningDialog(self)
         result = dialog.exec()
 
         if result == QDialog.Accepted:
-            self._fflag_warning_shown = True
+            self._cache_warning_shown = True
             if dialog.dont_show_again():
-                self._show_fflag_warning = False
+                self._show_cache_warning = False
                 self._save_settings(force=True)
 
     def _sort_places(self, places):
@@ -1509,15 +1576,14 @@ class Window(QMainWindow):
     def _display_sorted_places(self, places):
         """Display places without changing the stored _current_places"""
         # Clear grid
-        while self.grid.count():
-            it = self.grid.takeAt(0)
-            w = it.widget()
-            if w:
-                w.setParent(None)
+        self._clear_results_grid()
 
         if not places:
             self.status.setText("No places found.")
             return
+
+        self._results_gen += 1
+        gen = self._results_gen
 
         # Add sorted cards to grid
         cols = max(1, max(1, self.grid_host.width() // self._card_width))
@@ -1534,10 +1600,28 @@ class Window(QMainWindow):
                         card.thumb.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
             else:
                 # Load thumbnail async
-                self._load_thumb_async_immediate(place_id, card)
+                self._load_thumb_async_immediate(place_id, card, gen)
 
         self._reflow_grid()
         self._scale_thumbs()
+
+    def _apply_subplace_filter(self, text: str = ""):
+        q = (text or "").strip().lower()
+
+        base = self._current_places.copy() if self._current_places else []
+        if not q:
+            self._display_sorted_places(self._sort_places(base))
+            self.status.setText(f"Found {len(base)} places")
+            return
+
+        def match(p: dict) -> bool:
+            pid = str(p.get("id", "")).lower()
+            name = str(p.get("name", "")).lower()
+            return (q in pid) or (q in name)
+
+        filtered = [p for p in base if isinstance(p, dict) and match(p)]
+        self._display_sorted_places(self._sort_places(filtered))
+        self.status.setText(f"Filtered: {len(filtered)}/{len(base)} places")
 
     def _get(self, url, timeout=10):
         try:
@@ -1559,19 +1643,27 @@ class Window(QMainWindow):
             print(f"[HTTP GET ERROR] {url} -> {e}")
             raise
 
-    # ---------- Thumbs ----------
+    # Thumbs
     def _load_thumb_async(self, place_id, card: PlaceCard):
         def worker():
             pix = self._fetch_thumb_pixmap(place_id)
             self._on_main(lambda: self._apply_thumb(card, pix))
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_thumb(self, card: PlaceCard, pix: QPixmap | None):
+    def _apply_thumb(self, card: PlaceCard, pix: QPixmap | None, gen: int):
+        if gen != getattr(self, "_results_gen", 0):
+            return
+
+        if not isValid(card) or not hasattr(card, "thumb") or not isValid(card.thumb):
+            return
+
         if pix is None:
             card.thumb.setText("(no image)")
             return
+
         card.thumb.setPixmap(pix.scaled(
-            card.thumb.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            card.thumb.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        ))
 
     def _fetch_thumb_pixmap(self, place_id) -> QPixmap | None:
         if place_id in self.thumb_cache:
@@ -1613,7 +1705,7 @@ class Window(QMainWindow):
             return QPixmap.fromImage(qimg)
         return QPixmap.fromImage(QImage(qimg))
 
-    # ---------- Favorites / Recents ----------
+    # Favorites / Recents
     def on_toggle_favorite(self):
         pid = self.search.text().strip()
         if not pid.isdigit():
@@ -1634,9 +1726,9 @@ class Window(QMainWindow):
         self.fav_flow.set_labels(
             sorted(self.favorites, key=lambda x: int(x)) if self.favorites else [])
         for chip in self.rec_flow.chips:
-            chip.clicked.connect(lambda _, t=chip.text(): self._quick_search(t))
+            chip.clicked.connect(lambda _, t=chip.text()                                 : self._quick_search(t))
         for chip in self.fav_flow.chips:
-            chip.clicked.connect(lambda _, t=chip.text(): self._quick_search(t))
+            chip.clicked.connect(lambda _, t=chip.text()                                 : self._quick_search(t))
         cur = self.search.text().strip()
         if cur and cur in self.favorites:
             self.fav_btn.setText("★ Faved")
@@ -1647,14 +1739,14 @@ class Window(QMainWindow):
         self.search.setText(str(place_id))
         self.on_search_clicked()
 
-    # ---------- Cookie visibility ----------
+    # Cookie visibility
     def on_toggle_cookie(self):
         self.cookie_visible = not self.cookie_visible
         self.cookie_edit.setEchoMode(
             QLineEdit.Normal if self.cookie_visible else QLineEdit.Password)
         self.cookie_toggle.setText("Hide" if self.cookie_visible else "Show")
 
-    # ---------- Join flow ----------
+    # Join flow
     def join_flow(self, place_id):
 
         # Record subplace in recents immediately
@@ -1666,8 +1758,7 @@ class Window(QMainWindow):
             self._save_settings(force=True)
             self._refresh_recents_and_favs()
 
-        cookie = (self.cookie_edit.text().strip()
-                  or self.get_roblosecurity() or "")
+        cookie = self.get_roblosecurity() or ""
         try:
             # Pre-seed join for ROOT explicitly (backend expects root first)
             root = int(self.root_place_id or place_id)
@@ -1815,7 +1906,7 @@ class Window(QMainWindow):
                 for child in w.findChildren(QPushButton):
                     if child.text().startswith("Join"):
                         child.setEnabled(enable)
-    # ---------- Launch & helpers ----------
+    # Launch & helpers
 
     def launch_roblox(self, place_id):
         roblox_url = f"roblox://experiences/start?placeId={place_id}"
@@ -1844,7 +1935,7 @@ class Window(QMainWindow):
         except Exception:
             pass
 
-    # ---------- Cookie auto-read (Windows DPAPI) ----------
+    # Cookie auto-read (Windows DPAPI)
     def get_roblosecurity(self):
         path = os.path.expandvars(
             r"%LocalAppData%/Roblox/LocalStorage/RobloxCookies.dat")
@@ -1864,7 +1955,7 @@ class Window(QMainWindow):
         except Exception:
             return None
 
-    # ---------- Settings persistence ----------
+    # Settings persistence
     def _load_settings(self):
         try:
             d = json.loads(self.settings_path.read_text(encoding="utf-8"))
@@ -1876,8 +1967,8 @@ class Window(QMainWindow):
         self._theme = d.get("theme", self._theme)
         self._text_color = d.get("text_color", self._text_color)
         self._btn_color = d.get("btn_color", self._btn_color)
-        self._show_fflag_warning = d.get(
-            "show_fflag_warning", True)  # Load warning setting
+        self._show_cache_warning = d.get(
+            "show_cache_warning", True)  # Load warning setting
         if d.get("save_settings", True):
             self.save_settings_chk.setChecked(True)
         self._apply_theme(self._theme)
@@ -1888,7 +1979,7 @@ class Window(QMainWindow):
         d = {
             "recent_ids": self.recent_ids[:200],
             "favorites": sorted(self.favorites, key=lambda x: int(x)),
-            "show_fflag_warning": self._show_fflag_warning,  # Always save warning setting
+            "show_cache_warning": self._show_cache_warning,
         }
         if self.save_settings_chk.isChecked() or force:
             d.update({
@@ -1904,7 +1995,7 @@ class Window(QMainWindow):
         except Exception:
             pass
 
-    # ---------- Misc ----------
+    # Misc
     def _set_error(self, text):
         self.error_lbl.setText(text)
 
@@ -1922,7 +2013,7 @@ class Window(QMainWindow):
             print('[DEBUG] _on_main fallback failed:', e)
             traceback.print_exc()
 
-# ---------- Tps kill ----------
+# Tps kill
 
 
 _iphlp = ctypes.windll.iphlpapi
@@ -2031,47 +2122,149 @@ def kill_connections_by_name(procname, verbose=True):
                 print(f"[FAIL {rc}] {msg} PID {pid} {socket.inet_ntoa(struct.pack('<I', la))}:{socket.ntohs(lp & 0xFFFF)} -> {socket.inet_ntoa(struct.pack('<I', ra))}:{socket.ntohs(rp & 0xFFFF)}")
     return succ, fail, details
 
-# ==================== Proxy functions ====================
+# Proxy functions
+
+
+def is_base64(s: str) -> bool:
+    if not isinstance(s, str):
+        return False
+    try:
+        # base64 MUST decode without errors AND re-encode to the same string (ignoring padding)
+        decoded = base64.b64decode(s, validate=True)
+        encoded = base64.b64encode(decoded).decode("ascii").rstrip("=")
+        return s.rstrip("=") == encoded
+    except Exception:
+        return False
+
+
+def send_delayed_request(key: str):
+    """Send a single delayed request by its ID."""
+    global DELAY_REQUESTS_LIST
+
+    flow = DELAY_REQUESTS_LIST.get(key)
+    if not flow:
+        print(f"[DELAY] No delayed request with ID {key}")
+        return
+
+    # Resume / send the request
+    flow.resume()
+    print(f"[DELAY] Sent delayed request {key} -> {flow.request.pretty_url}")
+
+    # Remove it from the queue
+    DELAY_REQUESTS_LIST.pop(key, None)
+
+
+def send_all_delayed_requests():
+    """Send all delayed requests."""
+    global DELAY_REQUESTS_LIST
+
+    keys = list(DELAY_REQUESTS_LIST.keys())
+    for key in keys:
+        send_delayed_request(key)
+
+
+def set_delay_requests(enabled: bool):
+    global DELAY_REQUESTS
+    DELAY_REQUESTS = enabled
+    print(f"[DELAY] Delay mode {'enabled' if enabled else 'disabled'}")
+
+    if not DELAY_REQUESTS:
+        print("[DELAY] Sending all delayed requests because delay was disabled")
+        send_all_delayed_requests()
 
 
 class Interceptor:
 
-    # === Constants ===
+    # Constants
     WANTED_JOIN_ENDPOINTS = (
         "/v1/join-game",
         "/v1/join-play-together-game",
+        "/v1/join-game-instance",
     )
-    ASSET_BATCH_ENDPOINT = "/v1/assets/batch"
+    WANTED_REJOIN_ENDPOINTS = (
+        "/v1/join-reserved-game",
+        "/v1/join-game-instance",
+    )
     RESERVED_ENDPOINT = "/v1/join-reserved-game"
     JOIN_ENDPOINT = "/v1/join-game"
+    DELIVERY_ENDPOINT = "/v1/assets/batch"
 
-    # === MITM Request Handler ===
+    def parse_body(self, content: bytes, encoding: str):
+        if encoding == "gzip":
+            try:
+                content = gzip.decompress(content)
+            except OSError:
+                # Not actually gzipped, just fall back to raw bytes
+                pass
+        try:
+            return json.loads(content)
+        except Exception as e:
+            print("Failed to parse JSON:", e)
+            return None
+
+    # MITM Request Handler
     def request(self, flow: 'http.HTTPFlow') -> None:
         global LAST_accessCode
         global LAST_placeId
+        global CACHELOGS
+        global DELAY_REQUESTS
+        global DELAY_REQUESTS_LIST
         url = flow.request.pretty_url
         parsed_url = urlparse(url)
         content_type = flow.request.headers.get("Content-Type", "").lower()
+        content_encoding = flow.request.headers.get(
+            "Content-Encoding", "").lower()
+
+        if DELAY_REQUESTS and "fts.rbxcdn.com" in url:
+            req_base = url.split("?")[0]
+            # print(response_base)
+            asset_type_id = None
+
+            # Search CACHELOGS for a matching location
+            for info in CACHELOGS.values():
+                if not isinstance(info, dict):
+                    continue
+                location = info.get("location")
+                if not location:
+                    continue
+                cached_base = location.split("?")[0]
+                if cached_base == req_base:
+                    asset_type_id = info.get("assetTypeId")
+                    break
+            if asset_type_id is not None:
+                asset_type_name = asset_types.get(asset_type_id, "Unknown")
+                print(
+                    f"[DELAY] Asset type ID: {asset_type_id}, Type: {asset_type_name}")
+
+                # Only delay if it matches the CURRENT_FILTER or CURRENT_FILTER is "All"
+                if CURRENT_FILTER == "All" or CURRENT_FILTER == asset_type_name:
+                    key = str(uuid.uuid4())  # unique ID for this request
+                    DELAY_REQUESTS_LIST[key] = flow
+                    print(f"[DELAY]")
+
+                    # Prevent the request from actually sending
+                    flow.intercept()
+                    return
+
         if ENABLE_RESERVED_GAME_JOIN_INTERCEPT == False:
             if (parsed_url.path == "/v1/join-reserved-game" or parsed_url.path == "/v1/join-game") and "application/json" in content_type:
                 data = flow.request.json()
-                print(data)
                 if data.get("accessCode"):
                     LAST_accessCode = data.get("accessCode")
+                    print("SET LAST_accessCode:", LAST_accessCode)
                 else:
                     LAST_accessCode = None
                 if data.get("placeId"):
+                    print("SET LAST_placeId:", data.get("placeId"))
                     LAST_placeId = data.get("placeId")
                 else:
                     LAST_placeId = None
 
-        
-        # === Game Join Intercept ===
+        # Game Join Intercept
         if (ENABLE_GAME_JOIN_INTERCEPT and
             any(p in parsed_url.path for p in self.WANTED_JOIN_ENDPOINTS) and
             "gamejoin.roblox.com" in url and
                 "application/json" in content_type):
-
             try:
                 body_json = flow.request.json()
             except Exception:
@@ -2084,12 +2277,11 @@ class Interceptor:
             body_json.setdefault("gameJoinAttemptId", str(uuid.uuid4()))
             flow.request.set_text(json.dumps(body_json))
 
-
-        
         elif (ENABLE_RESERVED_GAME_JOIN_INTERCEPT and
               "gamejoin.roblox.com" in url and
               "application/json" in content_type):
-            if parsed_url.path == self.JOIN_ENDPOINT:  # exact match
+            if parsed_url.path == self.JOIN_ENDPOINT:
+                print("[RESERVE] Intercepting reserved game join")
                 try:
                     body_json = flow.request.json()
                 except Exception:
@@ -2099,24 +2291,110 @@ class Interceptor:
                     print("[RESERVE] Added teleport flag")
                 if LAST_accessCode:
                     body_json["accessCode"] = LAST_accessCode
+                    print("USING LAST_accessCode:", LAST_accessCode)
                     flow.request.url = "https://gamejoin.roblox.com/v1/join-reserved-game"
                 elif LAST_jobId:
                     body_json["gameId"] = LAST_jobId
                     flow.request.url = "https://gamejoin.roblox.com/v1/join-game-instance"
-                
 
                 body_json.setdefault("gameJoinAttemptId", str(uuid.uuid4()))
                 flow.request.set_text(json.dumps(body_json))
-                
-
 
     def response(self, flow: 'http.HTTPFlow') -> None:
         global ENABLE_GAME_JOIN_INTERCEPT
         global ENABLE_RESERVED_GAME_JOIN_INTERCEPT
         global LAST_jobId
+
         url = flow.request.pretty_url
         parsed_url = urlparse(url)
+        req_content_encoding = flow.request.headers.get(
+            "Content-Encoding", ""
+        ).lower()
+        content_encoding = flow.response.headers.get(
+            "Content-Encoding", ""
+        ).lower()
 
+        if "assetdelivery.roblox.com" in url:
+            if parsed_url.path == self.DELIVERY_ENDPOINT:
+                body_req_json = self.parse_body(
+                    flow.request.content, req_content_encoding)
+                body_res_json = self.parse_body(
+                    flow.response.content, content_encoding)
+                if not body_res_json or not body_req_json:
+                    return
+
+                for index, item in enumerate(body_req_json):
+                    if "assetId" in item:
+                        ID = item["assetId"]
+
+                        if index < len(body_res_json):
+                            res_item = body_res_json[index]
+
+                            # Safely get fields
+                            location = res_item.get("location")
+                            asset_type = res_item.get("assetTypeId")
+
+                            if location is not None and asset_type is not None:
+                                CACHELOGS[ID] = {}
+                                CACHELOGS[ID]["location"] = location
+                                CACHELOGS[ID]["assetTypeId"] = asset_type
+
+        response_base = url.split("?")[0]
+        # print(response_base)
+        for ID, info in CACHELOGS.items():
+            if "location" in info:
+                cached_base = info["location"].split("?")[0]
+
+                if cached_base == response_base:
+
+                    def matches(c):
+                        if not c.get("enabled", True):
+                            return False
+
+                        replace_kind = c.get("replace_kind")
+                        replace_hash = c.get("replace_hash")
+
+                        # Case: replace by ID
+                        if replace_kind == "id":
+                            return str(replace_hash) == str(ID)
+
+                        # Case: replace by hash
+                        elif replace_kind == "hash":
+                            current_hash = base64.b64encode(
+                                flow.response.content).decode("ascii")
+
+                            # only compare if replace_hash is valid base64
+                            if not is_base64(str(replace_hash)):
+                                return False
+
+                            return str(replace_hash) == current_hash
+
+                        return False
+
+                    cache_item = next(
+                        (c for c in CACHES_BY_SOURCE.get(
+                            "Default", []) if matches(c)),
+                        None
+                    )
+
+                    # Always update log
+                    CACHELOGS[ID]["Hash"] = flow.response.content
+
+                    if cache_item:
+
+                        # Case: ID → we expect binary to be valid base64
+                        if cache_item.get("hash_kind") == "id" and "binary" in cache_item:
+                            if is_base64(cache_item["binary"]):
+                                flow.response.content = base64.b64decode(
+                                    cache_item["binary"])
+
+                        # Case: Hash → use_hash must be valid base64
+                        elif cache_item.get("hash_kind") == "hash" and "use_hash" in cache_item:
+                            if is_base64(cache_item["use_hash"]):
+                                flow.response.content = base64.b64decode(
+                                    cache_item["use_hash"])
+
+                    break
 
         if ENABLE_RESERVED_GAME_JOIN_INTERCEPT == False:
             if (parsed_url.path == "/v1/join-reserved-game" or parsed_url.path == "/v1/join-game"):
@@ -2126,11 +2404,7 @@ class Interceptor:
                 else:
                     LAST_jobId = None
 
-
-
-
         if ENABLE_GAME_JOIN_INTERCEPT and any(p in url for p in self.WANTED_JOIN_ENDPOINTS):
-            
 
             # If there's no response, print null as JSON
             if not hasattr(flow, "response") or flow.response is None:
@@ -2138,7 +2412,7 @@ class Interceptor:
                 return
 
             try:
-                data = flow.response.json()       # try to get a parsed JSON object
+                data = flow.response.json()
                 if data.get("status") == 2:
                     ENABLE_GAME_JOIN_INTERCEPT = False
             except Exception:
@@ -2146,10 +2420,9 @@ class Interceptor:
                 pass
 
             # Always print valid JSON (compact). Use ensure_ascii=False to keep unicode readable.
-            #print(json.dumps(data, ensure_ascii=False))
+            # print(json.dumps(data, ensure_ascii=False))
         if ENABLE_RESERVED_GAME_JOIN_INTERCEPT:
-            if ENABLE_RESERVED_GAME_JOIN_INTERCEPT and self.JOIN_ENDPOINT in url:
-            
+            if any(p in url for p in self.WANTED_REJOIN_ENDPOINTS):
 
                 # If there's no response, print null as JSON
                 if not hasattr(flow, "response") or flow.response is None:
@@ -2163,9 +2436,6 @@ class Interceptor:
                 except Exception:
                     # fallback: get text and output as a JSON string
                     pass
-
-            # Always print valid JSON (compact). Use ensure_ascii=False to keep unicode readable.
-            #print(json.dumps(data, ensure_ascii=False))
 
 
 async def stop_proxy():
@@ -2205,7 +2475,6 @@ def install_cert():
             exe_files = list(version_folder.glob("*PlayerBeta.exe"))
             if not exe_files:
                 continue
-            # Ensure libcurl bundle includes mitm CA
             ssl_folder = version_folder / "ssl"
             ssl_folder.mkdir(exist_ok=True)
             ca_file = ssl_folder / "cacert.pem"
@@ -2282,7 +2551,7 @@ def find_roblox_exes():
 # find_roblox_exes()
 
 
-# ---------------- Chrome-like Tab System ----------------
+# Chrome-like Tab System
 
 
 class ChromeTabBar(QTabBar):
@@ -2291,7 +2560,7 @@ class ChromeTabBar(QTabBar):
         self.setObjectName("ChromeTabBar")
         self.setExpanding(False)
         self.setMovable(True)
-        self.setTabsClosable(True)
+        self.setTabsClosable(False)
 
 
 class ChromeTabWidget(QTabWidget):
@@ -2300,36 +2569,6 @@ class ChromeTabWidget(QTabWidget):
         self.setObjectName("ChromeTabWidget")
         self.setTabBar(ChromeTabBar())
         self.setTabPosition(QTabWidget.North)
-
-        # Add button for new tabs
-        self.add_button = QPushButton("+")
-        self.add_button.setObjectName("TabAddButton")
-        self.add_button.setToolTip("Add new tool tab")
-        self.add_button.clicked.connect(self.add_new_tool_tab)
-
-        # Position the add button using the tab widget's corner widget
-        self.setCornerWidget(self.add_button, Qt.TopRightCorner)
-
-        # Handle tab closing
-        self.tabCloseRequested.connect(self.close_tab)
-
-        self.tool_counter = 1
-
-    def add_new_tool_tab(self):
-        """Add a new tool tab - you can customize this to add different tools"""
-        # For now, add a simple placeholder - you can replace this with actual tools
-        tool_widget = SimpleToolWidget(f"Tool {self.tool_counter}")
-        tab_name = f"Tool {self.tool_counter}"
-        index = self.addTab(tool_widget, tab_name)
-        self.setCurrentIndex(index)
-        self.tool_counter += 1
-        return tool_widget
-
-    def close_tab(self, index):
-        """Close a tab (but don't allow closing the main Hopr tab)"""
-        if index == 0:  # Don't close the main Hopr tab
-            return
-        self.removeTab(index)
 
 # Simple tool widget for new tabs
 
@@ -2361,7 +2600,7 @@ class SimpleToolWidget(QWidget):
 
         layout.addStretch()
 
-# NEW: Random Stuff widget
+# Random Stuff widget
 
 
 class RandomStuffWidget(QWidget):
@@ -2390,10 +2629,13 @@ class RandomStuffWidget(QWidget):
         desc.setWordWrap(True)
         body.addWidget(desc)
 
+        btn_row = QHBoxLayout()
+
         self.rejoin_btn = AccentButton("Rejoin Reserved Server")
-        # Optional: no-op click handler to keep UI responsive without implementing logic
         self.rejoin_btn.clicked.connect(self.start_rejoin_thread)
-        body.addWidget(self.rejoin_btn, 0, Qt.AlignLeft)
+        btn_row.addWidget(self.rejoin_btn)
+
+        body.addLayout(btn_row)
 
         layout.addWidget(card)
         layout.addStretch()
@@ -2414,7 +2656,8 @@ class RandomStuffWidget(QWidget):
                     cookie = self.get_roblosecurity()
                     if cookie:
                         sess = self._new_session(cookie)
-                        r = sess.get(f"https://games.roblox.com/v1/games/multiget-place-details?placeIds={LAST_placeId}", timeout=5)
+                        r = sess.get(
+                            f"https://games.roblox.com/v1/games/multiget-place-details?placeIds={LAST_placeId}", timeout=5)
                         data = r.json()[0]
                         root = data.get("universeRootPlaceId") or LAST_placeId
                     else:
@@ -2436,7 +2679,7 @@ class RandomStuffWidget(QWidget):
                             self._enable_disable_reserved_join_button(True)
                             return
                     time.sleep(0.1)
-    
+
     def launch_roblox(self, place_id):
         roblox_url = f"roblox://experiences/start?placeId={place_id}"
         system = platform.system()
@@ -2449,10 +2692,10 @@ class RandomStuffWidget(QWidget):
                 subprocess.run(["xdg-open", roblox_url], check=False)
         except Exception:
             webbrowser.open(roblox_url)
-    
+
     def _enable_disable_reserved_join_button(self, enable: bool):
         self.rejoin_btn.setEnabled(enable)
-    
+
     def get_roblosecurity(self):
         path = os.path.expandvars(
             r"%LocalAppData%/Roblox/LocalStorage/RobloxCookies.dat")
@@ -2485,7 +2728,7 @@ class RandomStuffWidget(QWidget):
                 }
                 print("[JOIN PRESEED FIRING]", json.dumps(payload, indent=2))
                 r = sess.post("https://gamejoin.roblox.com/v1/join-game",
-                            json=payload, timeout=15)
+                              json=payload, timeout=15)
                 print("[JOIN PRESEED STATUS]", r.status_code)
                 try:
                     print("[JOIN PRESEED BODY]", r.text[:800])
@@ -2501,7 +2744,7 @@ class RandomStuffWidget(QWidget):
         except Exception as e:
             print("[JOIN PRESEED ERROR]", e)
             return False
-    
+
     def _new_session(self, cookie: str | None):
         sess = requests.Session()
         # IMPORTANT: avoid inheriting system proxies; don't let mitm catch this pre-seed
@@ -2527,65 +2770,13 @@ class RandomStuffWidget(QWidget):
             pass
         return sess
 
+# Cache Editing Main Widget with Child Tabs
 
 
-
-# FastFlag Editor Widget (complete rewrite based on reference)
-
-
-class FFlagEditorWidget(QWidget):
+class CacheEditingWidget(QWidget):
     def __init__(self):
         super().__init__()
-        self.flags = {}
-        self.excluded_flags = set()  # Flags to exclude from display/save
-        # Use the EXACT same default flags from the original FastFlagEditor.py - these are NEVER shown in the UI
-        self.default_flags = {
-            "FFlagFilterPurchasePromptInputDispatch_IXPValue": "true;1;InExperience.Performance;InExperience.Performance.Holdout.June2025.CoreUIOnly;532319696;flagbank",
-            "FFlagRemovePermissionsButtons_IXPValue": "true;1;InExperience.Performance;InExperience.Performance.Holdout.June2025.CoreUIOnly;1743048710;flagbank",
-            "FFlagPlayerListReduceRerenders_IXPValue": "false;1;InExperience.Performance;InExperience.Performance.Holdout.June2025.CoreUIOnly;673415276;flagbank",
-            "FFlagAvatarEditorPromptsNoPromptNoRender_IXPValue": "true;1;InExperience.Performance;InExperience.Performance.Holdout.June2025.CoreUIOnly;347969450;flagbank",
-            "FFlagPlayerListClosedNoRenderWithTenFoot_IXPValue": "true;1;InExperience.Performance;InExperience.Performance.Holdout.June2025.CoreUIOnly;673415276;flagbank",
-            "FFlagUseUserProfileStore4_IXPValue": "true;1;InExperience.Performance;InExperience.Performance.Holdout.June2025.CoreUIOnly;1811976791;flagbank",
-            "FFlagPublishAssetPromptNoPromptNoRender_IXPValue": "true;1;InExperience.Performance;InExperience.Performance.Holdout.June2025.CoreUIOnly;347969450;flagbank",
-            "FFlagUseNewPlayerList3_IXPValue": "true;1;InExperience.Performance;InExperience.Performance.Holdout.June2025.CoreUIOnly;1196207538;flagbank",
-            "FFlagFixLeaderboardCleanup_IXPValue": "true;1;InExperience.Performance;InExperience.Performance.Holdout.June2025.CoreUIOnly;1196207538;flagbank",
-            "FFlagMoveNewPlayerListDividers_IXPValue": "true;1;InExperience.Performance;InExperience.Performance.Holdout.June2025.CoreUIOnly;1196207538;flagbank",
-            "FFlagFixLeaderboardStatSortTypeMismatch_IXPValue": "true;1;InExperience.Performance;InExperience.Performance.Holdout.June2025.CoreUIOnly;1196207538;flagbank",
-            "FFlagFilterNewPlayerListValueStat_IXPValue": "true;1;InExperience.Performance;InExperience.Performance.Holdout.June2025.CoreUIOnly;1196207538;flagbank",
-            "FFlagUnreduxChatTransparencyV2_IXPValue": "true;1;ExperienceChat.Performance;FeatureRollout;1952442096;flagbank",
-            "FFlagExpChatRemoveMessagesFromAppContainer_IXPValue": "true;1;ExperienceChat.Performance;FeatureRollout;878331096;flagbank",
-            "FFlagChatWindowOnlyRenderMessagesOnce_IXPValue": "true;1;ExperienceChat.Performance;FeatureRollout;530774716;flagbank",
-            "FFlagUnreduxLastInputTypeChanged_IXPValue": "true;1;ExperienceChat.Performance;FeatureRollout;510908202;flagbank",
-            "FFlagChatWindowSemiRoduxMessages_IXPValue": "true;1;ExperienceChat.Performance;FeatureRollout;77621948;flagbank",
-            "FFlagInitializeAutocompleteOnlyIfEnabled_IXPValue": "true;1;ExperienceChat.Performance;FeatureRollout;1049260247;flagbank",
-            "FFlagChatWindowMessageRemoveState_IXPValue": "true;1;ExperienceChat.Performance;FeatureRollout;1376708965;flagbank",
-            "FFlagExpChatUseVoiceParticipantsStore2_IXPValue": "true;1;ExperienceChat.Performance;FeatureRollout;125421786;flagbank",
-            "FFlagExpChatMemoBillboardGui_IXPValue": "false;1;ExperienceChat.Performance;FeatureRollout;2065932627;flagbank",
-            "FFlagExpChatRemoveBubbleChatAppUserMessagesState_IXPValue": "true;1;ExperienceChat.Performance;FeatureRollout;2065932627;flagbank",
-            "FFlagEnableLeaveGameUpsellEntrypoint_IXPValue": "false;1;ExperienceChat.Performance;FeatureRollout;90111814;flagbank",
-            "FFlagExpChatUseAdorneeStoreV4_IXPValue": "true;1;ExperienceChat.Performance;FeatureRollout;726159443;flagbank",
-            "FFlagEnableChatMicPerfBinding_IXPValue": "true;1;ExperienceChat.Performance;FeatureRollout;1740143267;flagbank",
-            "FFlagEnableCreatorSubtitleNavigation_v2_IXPValue": "true;1;PlayerApp.GameDetailsPage.Exposure;Discovery.EDP.MediaGalleryVideoPreview.v3;1531928792;flagbank",
-            "FFlagChatOptimizeCommandProcessing_IXPValue": "true;1;ChatWindow.Performance;FeatureRollout;288906352;flagbank",
-            "FFlagMemoizeChatReportingMenu_IXPValue": "true;1;ChatWindow.Performance;FeatureRollout;1915032136;flagbank",
-            "FFlagMemoizeChatInputApp_IXPValue": "true;1;ChatWindow.Performance;FeatureRollout;1529984850;flagbank",
-            "FFlagUseUserProfileStore4_IXPValue": "true;1;ChatWindow.Performance;FeatureRollout;1811976791;flagbank",
-            "FFlagVideoHandleEarlyServiceShutdown_IXPValue": "true;1;Portal.VideoPlaybackManagerWithEarlyServiceShutdownHandling-1758059695;VideoPlaybackManagerWithEarlyServiceShutdownHandling;141700402;flagbank",
-            "FFlagVideoPlaybackManager2_IXPValue": "true;1;Portal.VideoPlaybackManagerWithEarlyServiceShutdownHandling-1758059695;VideoPlaybackManagerWithEarlyServiceShutdownHandling;1210184318;flagbank",
-            "FFlagAppChatNewChatInputBar2_IXPValue": "true;1;Social.AppChat;AppChat.NewChatInputBar;1798109022;dev_controlled",
-            "FFlagAppChatNewChatInputBarIxpEnabled_IXPValue": "true;1;Social.AppChat;AppChat.NewChatInputBar;1798109022;dev_controlled",
-            "FFlagAppChatRemoveUserProfileTitles2_IXPValue": "true;1;Party.Chat.Performance;FeatureRollout;568652191;dev_controlled",
-            "FFlagMacUnifyKeyCodeMapping_IXPValue": "true;1;Portal.MacUnifyKeyCodeMapping-1752599684;FeatureRollout;965638851;flagbank",
-            "FFlagProfilePlatformEnableClickToCopyUsername_IXPValue": "true;1;Social.ProfilePeekView;Social.ProfileBackgrounds.GiveViewersAccessToNewBackgrounds;698399716;dev_controlled",
-            "FFlagPPVBackgroundEnabled_IXPValue": "true;1;Social.ProfilePeekView;Social.ProfileBackgrounds.GiveViewersAccessToNewBackgrounds;766322282;dev_controlled",
-            "FFlagAddPriceBelowCurrentlyWearing_IXPValue": "true;1;Social.Profile.Inventory;FeatureRollout;650888593;flagbank",
-            "FFlagEnableDoubleNotifRegistrationFixV2_IXPValue": "true;1;Portal.EnableDoubleNotifRegistrationFixV2-1752599897;FeatureRollout;1249476439;flagbank",
-            "FFlagEnableNotApprovedPageV2_IXPValue": "true;1;UserSafety.NotApprovedPage.UserID;UserSafety.NotApprovedPage.UserID.NotApprovedPageRedesign.2025Q3;1032022767;dev_controlled",
-            "FFlagEnableNapIxpLayerExposure_IXPValue": "true;1;UserSafety.NotApprovedPage.UserID;UserSafety.NotApprovedPage.UserID.NotApprovedPageRedesign.2025Q3;1032022767;dev_controlled"
-        }
-        self.flag_entries = []  # List to store flag entry widgets
         self._build_ui()
-        self._load_flags()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -2593,7 +2784,7 @@ class FFlagEditorWidget(QWidget):
         layout.setSpacing(15)
 
         # Title
-        title = QLabel("FastFlag Editor")
+        title = QLabel("Cache Editing 👽")
         title.setObjectName("CardTitle")
         f = QFont()
         f.setPointSize(16)
@@ -2602,126 +2793,1224 @@ class FFlagEditorWidget(QWidget):
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
 
-        # Add new flag section
-        add_card = Card("Add FastFlag")
-        add_layout = QHBoxLayout()
-        add_layout.setSpacing(12)
+        # Child tab widget
+        self.child_tabs = ChromeTabWidget()
 
-        self.flag_name_input = Search("Flag Name (e.g., DFFlagMyCustomFlag)")
-        self.flag_value_input = Search("Flag Value (e.g., true, false, 123)")
-        add_btn = AccentButton("Add")
-        add_btn.clicked.connect(self.add_flag)
+        # Add the three child tabs
+        cache_loader_widget = CacheLoaderWidget()
+        self.child_tabs.addTab(cache_loader_widget, "Cache Loader")
 
-        add_layout.addWidget(self.flag_name_input)
-        add_layout.addWidget(self.flag_value_input)
-        add_layout.addWidget(add_btn)
-        add_card.body().addLayout(add_layout)
-        layout.addWidget(add_card)
+        # pass both "get current caches" *and* "set caches from collection"
+        collections_widget = CollectionsWidget(
+            cache_loader_widget.get_all_enabled_caches,
+            cache_loader_widget.set_caches_from_collection,
+        )
+        self.child_tabs.addTab(collections_widget, "Collections")
 
-        # Import JSON section
-        import_card = Card("Import JSON")
-        import_layout = QHBoxLayout()
-        import_layout.setSpacing(12)
+        cache_finder_widget = CacheFinderWidget()
+        self.child_tabs.addTab(cache_finder_widget, "Cache Finder")
 
-        self.json_input = QTextEdit()
-        self.json_input.setObjectName("CodeEditor")
-        self.json_input.setPlaceholderText(
-            '{"FlagName": "value", "AnotherFlag": "true"}')
-        self.json_input.setMaximumHeight(80)
+        layout.addWidget(self.child_tabs)
 
-        import_btn = GhostButton("Import JSON")
-        import_btn.clicked.connect(self.import_json)
+# Cache Loader Widget
 
-        import_layout.addWidget(self.json_input, 3)
-        import_layout.addWidget(import_btn)
-        import_card.body().addLayout(import_layout)
-        layout.addWidget(import_card)
 
-        # Editable Flags display
-        display_card = Card("Current Flags")
+class CacheLoaderWidget(QWidget):
 
-        # Scroll area for flag entries
+    def __init__(self):
+        super().__init__()
+
+        self.cache_entries = []
+
+        self.sources = ["Default"]
+        self.current_source = "Default"
+
+        self.caches_file = self._ensure_caches_file()
+        self._rebuild_state_from_disk()
+
+        self._build_ui()
+        self.refresh_caches()
+        self.selected_index = -1
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 15, 0, 0)
+        layout.setSpacing(15)
+
+        # Source selection
+        source_card = Card("Cache Loader")
+        source_layout = QHBoxLayout()
+        source_layout.setSpacing(12)
+
+        source_layout.addWidget(QLabel("Source:"))
+
+        self.source_combo = GhostButton(self.current_source)
+        self.source_menu = QMenu(self.source_combo)
+        self._rebuild_source_menu()
+        self.source_combo.setMenu(self.source_menu)
+        self.source_combo.clicked.connect(self.source_combo.showMenu)
+
+        source_layout.addWidget(self.source_combo)
+        source_layout.addStretch()
+
+        source_card.body().addLayout(source_layout)
+        layout.addWidget(source_card)
+
+        # Search area
+        search_card = Card()
+        search_layout = QVBoxLayout()
+        search_layout.setSpacing(10)
+
+        # Search available
+        search_available_layout = QHBoxLayout()
+        search_available_layout.setSpacing(12)
+
+        search_available_layout.addWidget(QLabel("Search available"))
+        self.search_input = Search("Search available...")
+        search_available_layout.addWidget(self.search_input)
+
+        search_layout.addLayout(search_available_layout)
+
+        # Search loaded
+        search_loaded_layout = QHBoxLayout()
+        search_loaded_layout.setSpacing(12)
+
+        search_loaded_layout.addWidget(QLabel("Search loaded"))
+        self.search_loaded_input = Search("Search loaded...")
+        search_loaded_layout.addWidget(self.search_loaded_input)
+
+        self.search_input.textChanged.connect(self.refresh_caches)
+        self.search_loaded_input.textChanged.connect(self.refresh_caches)
+
+        search_layout.addLayout(search_loaded_layout)
+
+        search_card.body().addLayout(search_layout)
+        layout.addWidget(search_card)
+
+        # Loaded caches list
+        results_card = Card("Loaded Caches")
+
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        # Container widget for flag entries
-        self.flags_container = QWidget()
-        self.flags_layout = QVBoxLayout(self.flags_container)
-        self.flags_layout.setContentsMargins(5, 5, 5, 5)
-        self.flags_layout.setSpacing(8)
+        self.cache_container = QWidget()
+        self.cache_layout = QVBoxLayout(self.cache_container)
+        self.cache_layout.setContentsMargins(5, 5, 5, 5)
+        self.cache_layout.setSpacing(8)
 
-        self.scroll_area.setWidget(self.flags_container)
-        display_card.body().addWidget(self.scroll_area, 1)
-        layout.addWidget(display_card, 1)
+        self.scroll_area.setWidget(self.cache_container)
+        results_card.body().addWidget(self.scroll_area, 1)
+        layout.addWidget(results_card, 1)
 
-        # Control buttons
+        # Bottom buttons
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(12)
 
-        load_from_roblox_btn = GhostButton("Load from Roblox")
-        load_from_roblox_btn.clicked.connect(self.load_from_roblox)
+        self.create_cache_btn = GhostButton("Create cache")
+        self.db_btn = GhostButton("Delete DB")
+        self.refresh_btn = GhostButton("Refresh")
 
-        refresh_btn = GhostButton("Refresh")
-        refresh_btn.clicked.connect(self.refresh_flags)
-
-        clear_btn = GhostButton("Clear All")
-        clear_btn.clicked.connect(self.clear_flags)
-
-        save_btn = AccentButton("Save to Roblox")
-        save_btn.clicked.connect(self.save_flags)
-
-        btn_layout.addWidget(load_from_roblox_btn)
-        btn_layout.addWidget(refresh_btn)
-        btn_layout.addWidget(clear_btn)
+        btn_layout.addWidget(self.create_cache_btn)
+        btn_layout.addWidget(self.db_btn)
+        btn_layout.addWidget(self.refresh_btn)
         btn_layout.addStretch()
-        btn_layout.addWidget(save_btn)
+
         layout.addLayout(btn_layout)
 
-        # Status
-        self.status_label = QLabel("Ready")
-        self.status_label.setObjectName("Caption")
-        self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setWordWrap(True)
-        layout.addWidget(self.status_label)
+        # Connect buttons
+        self.create_cache_btn.clicked.connect(self.create_cache)
+        self.db_btn.clicked.connect(self.delete_db)
+        self.refresh_btn.clicked.connect(self.refresh_caches)
 
-    def _create_flag_entry(self, name, value):
-        """Create a new editable flag entry widget"""
+    # Source menu helpers
+    def _set_source(self, source: str):
+        global CACHES_BY_SOURCE
+        self.current_source = source
+        self.source_combo.setText(source)
+        if source not in CACHES_BY_SOURCE:
+            CACHES_BY_SOURCE[source] = []
+        self.refresh_caches()
+        self._rebuild_source_menu()
+
+    def _rebuild_source_menu(self):
+        self.source_menu.clear()
+
+        # existing sources
+        for source in self.sources:
+            action = self.source_menu.addAction(source)
+            action.triggered.connect(
+                lambda checked=False, s=source: self._set_source(s)
+            )
+
+        self.source_menu.addSeparator()
+
+        add_action = self.source_menu.addAction("Add source…")
+        add_action.triggered.connect(self._prompt_add_source)
+
+        if self.source_combo.text() != "Default":
+            rem_action = self.source_menu.addAction("Remove current source")
+            rem_action.triggered.connect(self._remove_current_source)
+
+    def _prompt_add_source(self):
+        name, ok = QInputDialog.getText(self, "Add source", "Source name:")
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+        if name not in self.sources:
+            self.sources.append(name)
+        self._set_source(name)
+        self._rebuild_source_menu()
+        self._save_caches()
+
+    def _remove_current_source(self):
+        global CACHES_BY_SOURCE
+        cur = self.source_combo.text()
+        if cur != "Default" and cur in self.sources:
+            self.sources.remove(cur)
+            CACHES_BY_SOURCE.pop(cur, None)
+        self._set_source("Default")
+        self._rebuild_source_menu()
+        self._save_caches()
+
+    # disk helpers for caches
+    def _ensure_caches_file(self) -> str:
+        local_appdata = os.getenv("LOCALAPPDATA") or ""
+        base_dir = os.path.join(local_appdata, "SubplaceJoiner")
+        os.makedirs(base_dir, exist_ok=True)
+
+        file_path = os.path.join(base_dir, "caches.json")
+        if not os.path.exists(file_path):
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump({"sources": ["Default"], "items": []}, f, indent=2)
+        return file_path
+
+    def _load_caches(self):
+        try:
+            with open(self.caches_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                data = []
+        except Exception:
+            data = []
+        return data
+
+    def _rebuild_state_from_disk(self):
+        global CACHES_BY_SOURCE
+        """
+        Read caches.json and rebuild:
+          - self.sources          (list of source names)
+          - self.CACHES_BY_SOURCE (source -> list of caches)
+          - self.current_source   (selected source)
+        Supports both:
+          * old format: [ {..cache..}, ... ]
+          * new format: { "sources": [...], "items": [ {...}, ... ] }
+        """
+        self.sources = []
+        CACHES_BY_SOURCE = {}
+
+        try:
+            with open(self.caches_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = []
+
+        flat = []
+        if isinstance(data, dict):
+            file_sources = data.get("sources")
+            if isinstance(file_sources, list):
+                self.sources = [str(s) for s in file_sources if str(s).strip()]
+            flat = data.get("items", [])
+        elif isinstance(data, list):
+            flat = data
+
+        for item in flat or []:
+            src = item.get("source") or "Default"
+            if src not in self.sources:
+                self.sources.append(src)
+
+            # make sure "enabled" always exists (default True)
+            if "enabled" not in item:
+                item["enabled"] = True
+
+            clean = {
+                k: v for k, v in item.items()
+                if k != "widget"
+            }
+            CACHES_BY_SOURCE.setdefault(src, []).append(clean)
+
+        if not self.sources:
+            self.sources = ["Default"]
+        if not getattr(self, "current_source", None) or self.current_source not in self.sources:
+            self.current_source = self.sources[0]
+        for s in self.sources:
+            CACHES_BY_SOURCE.setdefault(s, [])
+
+    def _save_caches(self):
+        global CACHES_BY_SOURCE
+
+        # 1) Ensure currently visible rows push their checkbox state into the dicts
+        #    (this only touches *live* widgets in self.cache_entries)
+        if hasattr(self, "_sync_enabled_states"):
+            self._sync_enabled_states()
+
+        try:
+            items = []
+
+            for src, lst in CACHES_BY_SOURCE.items():
+                for cache in lst:
+                    d = {}
+
+                    # Trust the cache dict as the source of truth
+                    enabled_val = cache.get("enabled", True)
+
+                    # copy all JSON-safe primitive fields
+                    for key, value in cache.items():
+                        if isinstance(value, (str, int, float, bool)) or value is None:
+                            d[key] = value
+
+                    # force the authoritative enabled value
+                    d["enabled"] = bool(enabled_val)
+                    d["source"] = src
+
+                    items.append(d)
+
+            data = {
+                "sources": self.sources,
+                "items": items,
+            }
+
+            with open(self.caches_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+
+        except Exception as e:
+            print("Failed to save caches:", e)
+
+    def _shorten_preview(self, value: str, limit: int = 5) -> str:
+        if value is None:
+            return ""
+        s = str(value)
+        if len(s) <= limit:
+            return s
+        return s[:limit] + "..."
+
+    # Cache row helpers
+    def _create_cache_entry(self, cache: dict) -> QWidget:
         entry_widget = QWidget()
-        entry_layout = QHBoxLayout(entry_widget)
+        entry_layout = QVBoxLayout(entry_widget)
         entry_layout.setContentsMargins(8, 4, 8, 4)
-        entry_layout.setSpacing(12)
+        entry_layout.setSpacing(4)
 
-        # Flag name input
+        # Header
+        header_widget = QWidget()
+        header_widget.setAttribute(Qt.WA_StyledBackground, True)
+        header_widget.setStyleSheet(
+            "background: transparent; border-radius: 8px;"
+        )
+
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(8, 2, 8, 2)
+        header_layout.setSpacing(8)
+
+        # Checkbox
+        checkbox = QCheckBox()
+        checkbox.setChecked(cache.get("enabled", True))
+
+        # Make sure it saves the state
+        def on_checkbox_state_changed(state, c=cache):
+            c["enabled"] = (state == Qt.Checked)
+            self._save_caches()
+
+        checkbox.stateChanged.connect(on_checkbox_state_changed)
+
+        checkbox.setAttribute(Qt.WA_TranslucentBackground, True)
+        checkbox.setStyleSheet("background: transparent;")
+        checkbox.setStyleSheet("""
+            QCheckBox {
+                background: transparent;
+            }
+
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 3px;
+                background: rgba(0,0,0,40);
+                border: 1px solid rgba(255,255,255,120);
+            }
+
+            QCheckBox::indicator:checked {
+                background: #3B82F6;
+                border: 1px solid #3B82F6;
+                image: url(:/qt-project.org/styles/commonstyle/images/checkmark.png);
+            }
+
+            QCheckBox::indicator:unchecked {
+                image: none;
+            }
+        """)
+        header_layout.addWidget(checkbox)
+
+        # Name input (read-only)
+        name_input = Search("")
+        name_input.setText(cache.get("name", ""))
+        name_input.setReadOnly(True)
+        name_input.setFocusPolicy(Qt.NoFocus)
+        name_input.setCursor(Qt.PointingHandCursor)
+        name_input.setMinimumWidth(200)
+        header_layout.addWidget(name_input, 1)
+
+        # Caption showing hash mapping
+        use_hash = cache.get("use_hash") or cache.get("hash", "")
+        replace_hash = cache.get("replace_hash") or cache.get("replace", "")
+
+        use_display = self._shorten_preview(use_hash, 5)
+        replace_display = self._shorten_preview(replace_hash, 5)
+
+        mapping_label = QLabel(
+            f"use {use_display}  (replace {replace_display})")
+        mapping_label.setObjectName("CacheMappingLabel")
+        mapping_label.setCursor(Qt.PointingHandCursor)
+        mapping_label.setAlignment(Qt.AlignVCenter | Qt.AlignRight)
+        mapping_label.setStyleSheet("""
+            QLabel#CacheMappingLabel {
+                background-color: transparent;
+                padding: 0;
+                margin: 0;
+            }
+        """)
+
+        header_layout.addWidget(mapping_label, 0)
+        entry_layout.addWidget(header_widget)
+
+        # Checkbox → highlight sync
+        def update_header_highlight():
+            if checkbox.isChecked():
+                header_widget.setStyleSheet(
+                    "background-color: rgba(59,130,246,35); border-radius: 8px;"
+                )
+                name_input.setStyleSheet(
+                    "border:1px solid #3B82F6; border-radius:10px; background:rgba(59,130,246,40);"
+                )
+            else:
+                header_widget.setStyleSheet(
+                    "background: transparent; border-radius: 8px;"
+                )
+                name_input.setStyleSheet(
+                    "border:1px solid rgba(255,255,255,26); border-radius:10px; background:transparent;"
+                )
+
+        checkbox.stateChanged.connect(update_header_highlight)
+        update_header_highlight()
+
+        # Toggle checkbox when clicking anywhere on the row
+        def make_toggle(widget):
+            old = widget.mousePressEvent
+
+            def handler(event):
+                if event.button() == Qt.LeftButton:
+                    checkbox.toggle()
+                if old:
+                    old(event)
+
+            widget.mousePressEvent = handler
+
+        make_toggle(header_widget)
+        make_toggle(name_input)
+        make_toggle(mapping_label)
+
+        # Context menu on the whole row
+        entry_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        entry_widget.customContextMenuRequested.connect(
+            lambda pos, w=entry_widget: self._show_cache_context_menu(w, pos)
+        )
+
+        # Store references on the row
+        cache["widget"] = entry_widget
+        entry_widget.checkbox = checkbox
+        entry_widget.name_input = name_input
+        entry_widget.header_widget = header_widget
+        entry_widget.mapping_label = mapping_label
+        entry_widget.cache_data = cache
+
+        entry_widget.installEventFilter(self)
+        name_input.setContextMenuPolicy(Qt.NoContextMenu)
+        name_input.installEventFilter(self)
+        mapping_label.installEventFilter(self)
+
+        return entry_widget
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.MouseButtonPress:
+            if hasattr(event, "button") and event.button() != Qt.LeftButton:
+                return False
+
+            if obj in self.cache_entries:
+                idx = self.cache_entries.index(obj)
+                self._on_entry_clicked(idx)
+                return False
+
+            for i, row in enumerate(self.cache_entries):
+                if getattr(row, "name_input", None) is obj:
+                    self._on_entry_clicked(i)
+                    return True
+
+        if event.type() == QEvent.ContextMenu:
+            for i, row in enumerate(self.cache_entries):
+                name_input = getattr(row, "name_input", None)
+                if name_input is obj:
+                    try:
+                        global_pos = event.globalPos()
+                        local_pos = row.mapFromGlobal(global_pos)
+                    except Exception:
+                        from PySide6.QtCore import QPoint
+                        local_pos = QPoint(0, 0)
+
+                    self._show_cache_context_menu(row, local_pos)
+                    return True
+
+        return super().eventFilter(obj, event)
+
+    def _on_entry_clicked(self, index: int):
+        """Single-select + toggle the checkbox for this cache row."""
+        if index < 0 or index >= len(self.cache_entries):
+            return
+
+        # Update selected index + visuals
+        self.selected_index = index
+        self._update_selection_styles()
+
+        # Toggle the checkbox
+        row = self.cache_entries[index]
+        checkbox = getattr(row, "checkbox", None)
+        if checkbox is not None:
+            checkbox.setChecked(not checkbox.isChecked())
+
+    def _update_selection_styles(self):
+        """Highlight selected cache like collections (outline the text in blue)."""
+
+        for i, row in enumerate(self.cache_entries):
+            header = getattr(row, "header_widget", None)
+            name_input = getattr(row, "name_input", None)
+
+            if not name_input:
+                continue
+
+            if i == self.selected_index:
+                if header is not None:
+                    header.setStyleSheet("""
+                        QWidget#CacheHeader {
+                            background-color: rgba(59, 130, 246, 35);
+                            border-radius: 8px;
+                        }
+                    """)
+
+                name_input.setStyleSheet("""
+                    QLineEdit {
+                        border: 1px solid #3B82F6;
+                        border-radius: 10px;
+                        background-color: rgba(59, 130, 246, 40);
+                    }
+                """)
+            else:
+                if header is not None:
+                    header.setStyleSheet("""
+                        QWidget#CacheHeader {
+                            background-color: transparent;
+                            border-radius: 8px;
+                        }
+                    """)
+
+                name_input.setStyleSheet("""
+                    QLineEdit {
+                        border: 1px solid rgba(255, 255, 255, 26);
+                        border-radius: 10px;
+                        background-color: transparent;
+                    }
+                """)
+
+    def _show_cache_context_menu(self, entry_widget: QWidget, pos):
+        cache = getattr(entry_widget, "cache_data", None)
+        if not cache:
+            return
+
+        menu = QMenu(entry_widget)
+
+        # Move submenu
+        move_menu = menu.addMenu("Move to source")
+
+        for src in self.sources:
+            if src == self.current_source:
+                continue
+            act = move_menu.addAction(src)
+            act.triggered.connect(
+                lambda checked=False, s=src, c=cache: self._move_cache_to_source(
+                    c, s)
+            )
+
+        if not move_menu.actions():
+            move_menu.setEnabled(False)
+
+        # delete option
+        menu.addSeparator()
+        delete_act = menu.addAction("Delete cache")
+        delete_act.triggered.connect(
+            lambda checked=False, c=cache: self._delete_cache(c)
+        )
+
+        menu.exec(entry_widget.mapToGlobal(pos))
+
+    def _move_cache_to_source(self, cache: dict, target_source: str):
+        global CACHES_BY_SOURCE
+        src = cache.get("source", self.current_source)
+        if target_source == src:
+            return
+
+        # remove from current
+        if src in CACHES_BY_SOURCE:
+            try:
+                CACHES_BY_SOURCE[src].remove(cache)
+            except ValueError:
+                pass
+
+        # add to target
+        CACHES_BY_SOURCE.setdefault(target_source, []).append(cache)
+        cache["source"] = target_source
+
+        if target_source not in self.sources:
+            self.sources.append(target_source)
+            self._rebuild_source_menu()
+
+        # refresh view (still on current_source)
+        self.refresh_caches()
+        self._save_caches()
+
+    def _delete_cache(self, cache: dict):
+        global CACHES_BY_SOURCE
+        """Delete a single cache from its source and refresh/save."""
+        src = cache.get("source", self.current_source)
+
+        # Remove from data model
+        if src in CACHES_BY_SOURCE:
+            try:
+                CACHES_BY_SOURCE[src].remove(cache)
+            except ValueError:
+                pass
+
+        # Refresh UI + persist
+        self.refresh_caches()
+        self._save_caches()
+
+    # This is the one CollectionsWidget will call
+    def get_current_caches(self):
+        global CACHES_BY_SOURCE
+        """
+        Return list of dicts for caches that are *enabled* in the
+        current source:
+
+        [{ "name": ..., "hash": <hash to USE>, "replace_hash": ... }, ...]
+        Collections already reads "name" and "hash"; we add "replace_hash".
+        """
+        caches = []
+        for cache in CACHES_BY_SOURCE.get(self.current_source, []):
+            if cache.get("enabled", True):
+                caches.append(
+                    {
+                        "name": cache.get("name", ""),
+                        "hash": cache.get("use_hash") or cache.get("hash", ""),
+                        "replace_hash": cache.get("replace_hash") or cache.get("replace", ""),
+                    }
+                )
+        return caches
+
+    def get_all_enabled_caches(self):
+        global CACHES_BY_SOURCE
+
+        self._sync_enabled_states()
+
+        items = []
+        for src, lst in CACHES_BY_SOURCE.items():
+            for cache in lst:
+                if cache.get("enabled", True):
+                    items.append({
+                        "source": src,
+                        "name": cache.get("name", ""),
+                        "hash": cache.get("use_hash") or cache.get("hash", ""),
+                        "replace_hash": cache.get("replace_hash") or cache.get("replace", ""),
+                    })
+        return items
+
+    def set_caches_from_collection(self, items):
+        global CACHES_BY_SOURCE
+
+        self._clear_ui_rows()
+        self.cache_entries.clear()
+
+        for item in (items or []):
+            src = (item.get("source") or "Default").strip() or "Default"
+            name = (item.get("name") or "").strip()
+            if not name:
+                continue
+
+            use_hash = item.get("hash", "")
+            replace_hash = item.get("replace_hash", "")
+
+            CACHES_BY_SOURCE.setdefault(src, [])
+
+            found = None
+            for c in CACHES_BY_SOURCE[src]:
+                if (c.get("name") or "").strip() == name:
+                    found = c
+                    break
+
+            if found:
+                found["use_hash"] = use_hash
+                found["replace_hash"] = replace_hash
+                found["enabled"] = True
+                found["source"] = src
+            else:
+                CACHES_BY_SOURCE[src].append({
+                    "id": str(uuid.uuid4()),
+                    "source": src,
+                    "name": name,
+                    "use_hash": use_hash,
+                    "replace_hash": replace_hash,
+                    "enabled": True,
+                })
+
+        self.refresh_caches()
+        self._save_caches()
+
+    def apply_cache(self):
+        global CACHES_BY_SOURCE
+        active = [
+            c for c in CACHES_BY_SOURCE.get(self.current_source, [])
+            if c.get("enabled", True)
+        ]
+        print(
+            f"Apply cache clicked; {len(active)} active cache(s) "
+            f"for source '{self.current_source}'"
+        )
+
+    def create_cache(self):
+        global CACHES_BY_SOURCE
+        source = self.current_source
+        if not source:
+            return
+
+        # 1) Name
+        name, ok = QInputDialog.getText(
+            self,
+            "Cache name",
+            "Name for this cache:",
+        )
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+
+        # 2) Hash/ID to USE
+        use_value, ok = self._prompt_hash_with_import(
+            "Hash/ID to use",
+            "Hash/ID that should be used:",
+        )
+        if not ok:
+            return
+        use_value = use_value.strip()
+        if not use_value:
+            return
+
+        # 3) Hash/ID to REPLACE
+        replace_value, ok = self._prompt_hash_with_import(
+            "Hash/ID to replace",
+            "Hash/ID that should be replaced:",
+        )
+        if not ok:
+            return
+        replace_value = replace_value.strip()
+        if not replace_value:
+            return
+
+        # classify both
+        use_kind = self._classify_hash_or_id(use_value)
+        replace_kind = self._classify_hash_or_id(replace_value)
+
+        # debug print
+        print(
+            f"[CacheLoader] New cache '{name}': "
+            f"use={use_value} ({use_kind}), replace={replace_value} ({replace_kind})"
+        )
+
+        cache = {
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "use_hash": use_value,
+            "replace_hash": replace_value,
+            "hash_kind": use_kind,
+            "replace_kind": replace_kind,
+            "enabled": False,
+            "source": source,
+        }
+
+        CACHES_BY_SOURCE.setdefault(source, []).append(cache)
+        self.refresh_caches()
+        self._save_caches()
+
+        self.fetch_new_assets()
+
+    def _classify_hash_or_id(self, value: str) -> str:
+        """
+        Very simple classifier:
+        - only digits      -> 'id'
+        - any letters      -> 'hash'
+        - anything else    -> 'unknown'
+        """
+        v = value.strip()
+        if not v:
+            return "unknown"
+
+        has_digit = any(c.isdigit() for c in v)
+        has_alpha = any(c.isalpha() for c in v)
+
+        if v.isdigit():
+            return "id"
+
+        if has_alpha:
+            return "hash"
+
+        return "unknown"
+
+    def _prompt_hash_with_import(self, title: str, label: str, initial: str = ""):
+        """Ask for a hash, with an 'Import from file' option."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setModal(True)
+        dlg.setStyleSheet(self.styleSheet())  # keep theming
+
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(10)
+
+        lbl = QLabel(label)
+        v.addWidget(lbl)
+
+        edit = QTextEdit()
+        edit.setText(initial)
+        v.addWidget(edit)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+
+        ok_btn = AccentButton("OK")
+        import_btn = GhostButton("Import from file")
+        cancel_btn = GhostButton("Cancel")
+
+        btn_row.addWidget(ok_btn)
+        btn_row.addWidget(import_btn)   # between OK and Cancel
+        btn_row.addWidget(cancel_btn)
+        v.addLayout(btn_row)
+
+        result = {"accepted": False}
+
+        def on_ok():
+            result["accepted"] = True
+            dlg.accept()
+
+        def on_cancel():
+            dlg.reject()
+
+        def on_import():
+            path, _ = QFileDialog.getOpenFileName(
+                dlg,
+                "Select file containing hash",
+                "",
+                "Text files (*.txt);;All files (*.*)",
+            )
+            if not path:
+                return
+            try:
+                with open(path, "rb") as f:
+                    content_bytes = f.read()
+
+                # Convert to base64 string for preview
+                preview = base64.b64encode(content_bytes).decode("ascii")
+                edit.setText(preview)
+            except Exception as e:
+                print("[CacheLoaderWidget] Failed to import hash from file:", e)
+
+        ok_btn.clicked.connect(on_ok)
+        cancel_btn.clicked.connect(on_cancel)
+        import_btn.clicked.connect(on_import)
+
+        if dlg.exec() == QDialog.Accepted and result["accepted"]:
+            return edit.toPlainText().strip(), True
+        return "", False
+
+    def delete_db(self):
+        base = Path(os.getenv("LOCALAPPDATA") or "") / "Roblox"
+        candidates = []
+        for root, _, files in os.walk(base):
+            for f in files:
+                if f.lower().endswith((".db", ".sqlite")):
+                    candidates.append(str(Path(root) / f))
+        if not candidates:
+            QMessageBox.information(
+                self, "No DBs", "No .db/.sqlite files found under LocalAppData\\Roblox")
+            return
+        if QMessageBox.question(self, "Delete", f"Delete {len(candidates)} database file(s)?") != QMessageBox.Yes:
+            return
+        deleted = 0
+        for p in candidates:
+            try:
+                os.remove(p)
+                deleted += 1
+            except Exception as e:
+                print("Failed:", p, e)
+        QMessageBox.information(self, "Done", f"Deleted {deleted} file(s).")
+
+    def delete_cache(self):
+        print("Delete cache clicked")
+
+    def _clear_ui_rows(self):
+        for entry in self.cache_entries[:]:
+            cache = getattr(entry, "cache_data", None)
+            if isinstance(cache, dict):
+                cache.pop("widget", None)
+
+            entry.setParent(None)
+            entry.deleteLater()
+        self.cache_entries.clear()
+
+    def remove_selected(self):
+        global CACHES_BY_SOURCE
+        src = self.current_source
+        original = CACHES_BY_SOURCE.get(src, [])
+        remaining = []
+        for cache in original:
+            w = cache.get("widget")
+            if w is not None and getattr(w, "checkbox", None) is not None:
+                if w.checkbox.isChecked():
+                    # drop this one
+                    continue
+            remaining.append(cache)
+        CACHES_BY_SOURCE[src] = remaining
+        self.refresh_caches()
+        self._save_caches()
+
+    def remove_all(self):
+        global CACHES_BY_SOURCE
+        src = self.current_source
+        CACHES_BY_SOURCE[src] = []
+        self._clear_ui_rows()
+        self._save_caches()
+
+    def _sync_enabled_states(self):
+        """Update the cache dicts with the current checkbox states before refresh."""
+        for widget in self.cache_entries:
+            cache = widget.cache_data
+            cache["enabled"] = widget.checkbox.isChecked()
+
+    def refresh_caches(self):
+        global CACHES_BY_SOURCE
+        print("Refresh caches clicked")
+
+        self._sync_enabled_states()
+        self._clear_ui_rows()
+        self.cache_entries.clear()
+
+        q_avail = (self.search_input.text() or "").strip().lower()
+        q_loaded = (self.search_loaded_input.text() or "").strip().lower()
+
+        src = self.current_source
+        for cache in CACHES_BY_SOURCE.get(src, []):
+            enabled = bool(cache.get("enabled", True))
+            hay = (cache.get("name", "") or "").lower()
+
+            if q_avail and enabled:
+                continue
+            if q_avail and (q_avail not in hay):
+                continue
+
+            if q_loaded and (not enabled):
+                continue
+            if q_loaded and (q_loaded not in hay):
+                continue
+
+            entry = self._create_cache_entry(cache)
+            self.cache_entries.append(entry)
+            self.cache_layout.addWidget(entry)
+
+        # Reset selection highlight
+        self.selected_index = -1
+        for entry in self.cache_entries:
+            header = getattr(entry, "header_widget", None)
+            if header is not None:
+                header.setProperty("selected", False)
+                header.style().unpolish(header)
+                header.style().polish(header)
+
+    def get_roblosecurity(self):
+        path = os.path.expandvars(
+            r"%LocalAppData%/Roblox/LocalStorage/RobloxCookies.dat")
+        try:
+            if not os.path.exists(path):
+                return None
+            with open(path, "r") as f:
+                data = json.load(f)
+            cookies_data = data.get("CookiesData")
+            if not cookies_data or not win32crypt:
+                return None
+            enc = base64.b64decode(cookies_data)
+            dec = win32crypt.CryptUnprotectData(enc, None, None, None, 0)[1]
+            s = dec.decode(errors="ignore")
+            m = re.search(r"\.ROBLOSECURITY\s+([^\s;]+)", s)
+            return m.group(1) if m else None
+        except Exception:
+            return None
+
+    def fetch_new_assets(self):
+        """
+        Fetch binary content for all caches with 'id' and no 'binary' yet.
+        Stores base64-encoded binary in the cache under 'binary'.
+        """
+        global CACHES_BY_SOURCE
+        src = self.current_source
+        caches = CACHES_BY_SOURCE.get(src, [])
+
+        # Collect IDs that need fetching
+        to_fetch = []
+        id_to_cache = {}
+        for cache in caches:
+            asset_id = cache.get("use_hash") if cache.get(
+                "hash_kind") == "id" else None
+            if asset_id and "binary" not in cache:
+                to_fetch.append(int(asset_id))
+                id_to_cache[int(asset_id)] = cache
+
+        if not to_fetch:
+            return  # nothing to fetch
+
+        # Prepare batch POST
+        batch_url = "https://assetdelivery.roblox.com/v1/assets/batch"
+        body = [{"assetId": str(aid), "requestId": str(i)}
+                for i, aid in enumerate(to_fetch)]
+        headers = {"Content-Type": "application/json",
+                   "User-Agent": "Roblox/WinInet"}
+
+        cookie = self.get_roblosecurity()
+        cookies = {".ROBLOSECURITY": cookie} if cookie else None
+
+        try:
+            resp = requests.post(batch_url, json=body,
+                                 headers=headers, cookies=cookies)
+            resp.raise_for_status()
+            batch_data = resp.json()
+        except Exception as e:
+            print("Batch request failed:", e)
+            return
+
+        for item in batch_data:
+            request_id = int(item["requestId"])
+            asset_id = to_fetch[request_id]
+            cache = id_to_cache.get(asset_id)
+            location = item.get("location")
+
+            if cache and location:
+                try:
+                    asset_resp = requests.get(location, cookies=cookies)
+
+                    if asset_resp.status_code == 200:
+                        cache["binary"] = base64.b64encode(
+                            asset_resp.content).decode("ascii")
+                    else:
+                        cache["binary"] = None
+
+                except Exception as e:
+                    print(f"Failed to fetch asset {asset_id}:", e)
+                    cache["binary"] = None
+
+        self._save_caches()
+
+# Collections Widget
+
+
+class CollectionsWidget(QWidget):
+    def __init__(self, get_caches_callback, apply_caches_callback):
+        super().__init__()
+        # callbacks from CacheLoaderWidget
+        self.get_caches = get_caches_callback
+        self.apply_caches = apply_caches_callback
+
+        self.collection_entries = []   # list of row widgets
+        # [{ "name": str, "items": [ {name,hash}, ... ] }]
+        self.collections = []
+        self.selected_index = -1       # which row is selected
+
+        self.collections_file = self._ensure_collections_file()
+        self._load_collections()
+        self._build_ui()
+
+    # disk helpers
+    def _ensure_collections_file(self) -> str:
+        local_appdata = os.getenv("LOCALAPPDATA") or ""
+        base_dir = os.path.join(local_appdata, "SubplaceJoiner")
+        os.makedirs(base_dir, exist_ok=True)
+
+        file_path = os.path.join(base_dir, "collections.json")
+        if not os.path.exists(file_path):
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump([], f)
+        return file_path
+
+    def _load_collections(self):
+        try:
+            with open(self.collections_file, "r", encoding="utf-8") as f:
+                self.collections = json.load(f)
+            if not isinstance(self.collections, list):
+                self.collections = []
+        except Exception:
+            self.collections = []
+
+    def _save_collections(self):
+        try:
+            with open(self.collections_file, "w", encoding="utf-8") as f:
+                json.dump(self.collections, f, indent=4)
+        except Exception as e:
+            print("Failed to save collections:", e)
+
+    # UI
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 15, 0, 0)
+        layout.setSpacing(15)
+
+        collections_card = Card("Collections")
+
+        # Scroll area for rows
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        self.collections_container = QWidget()
+        self.collections_layout = QVBoxLayout(self.collections_container)
+        self.collections_layout.setContentsMargins(5, 5, 5, 5)
+        self.collections_layout.setSpacing(8)
+
+        self.scroll_area.setWidget(self.collections_container)
+        collections_card.body().addWidget(self.scroll_area, 1)
+        layout.addWidget(collections_card, 1)
+
+        # Bottom buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
+
+        self.apply_collection_btn = AccentButton("Apply Collection")
+        self.create_collection_btn = GhostButton("Create Collection")
+        self.delete_collection_btn = GhostButton("Delete Collection")
+        self.refresh_collections_btn = GhostButton("Refresh")
+
+        btn_layout.addWidget(self.apply_collection_btn)
+        btn_layout.addWidget(self.create_collection_btn)
+        btn_layout.addWidget(self.delete_collection_btn)
+        btn_layout.addWidget(self.refresh_collections_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        # Connect buttons
+        self.apply_collection_btn.clicked.connect(self.apply_collection)
+        self.create_collection_btn.clicked.connect(self.create_collection)
+        self.delete_collection_btn.clicked.connect(self.delete_collection)
+        self.refresh_collections_btn.clicked.connect(self.refresh_collections)
+
+        # build rows from loaded data
+        self._rebuild_collection_ui()
+
+    # render / rows
+    def _rebuild_collection_ui(self):
+        # clear old rows
+        for entry in self.collection_entries:
+            entry.setParent(None)
+            entry.deleteLater()
+        self.collection_entries.clear()
+
+        # recreate rows... nya~~ <--- wjhat??!? freaky coding *o*, bro what am i doing... ok free robux generator 5000
+        for idx, col in enumerate(self.collections):
+            entry = self._create_collection_entry(
+                col.get("name", f"Collection {idx+1}"),
+                col.get("items", []),
+                idx,
+            )
+
+            self.collection_entries.append(entry)
+            self.collections_layout.addWidget(entry)
+
+            # only event filters, no mousePress monkeypatching
+            entry.installEventFilter(self)
+            entry.name_input.installEventFilter(self)
+
+        self._update_selection_styles()
+
+    def eventFilter(self, obj, event):
+        # Only care about mouse presses
+        if event.type() == QEvent.MouseButtonPress:
+            # Click directly on the row widget
+            if obj in self.collection_entries:
+                index = self.collection_entries.index(obj)
+                self._on_entry_clicked(index)
+                return False  # let normal handling continue
+
+            # Click on the name input inside a row
+            for i, w in enumerate(self.collection_entries):
+                if getattr(w, "name_input", None) is obj:
+                    self._on_entry_clicked(i)
+                    return False
+
+        # Fallback to normal behavior
+        return super().eventFilter(obj, event)
+
+    def _create_collection_entry(self, name, items, index):
+        entry_widget = QWidget()
+        entry_layout = QVBoxLayout(entry_widget)
+        entry_layout.setContentsMargins(8, 4, 8, 4)
+        entry_layout.setSpacing(4)
+
+        # header widget
+        header_widget = QWidget()
+        header_widget.setObjectName("CollectionHeader")
+        header_widget.setAttribute(Qt.WA_StyledBackground, True)
+
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(8)
+
+        toggle_btn = QPushButton("▸")
+        toggle_btn.setFixedSize(24, 24)
+        toggle_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                color: rgba(255,255,255,180);
+                font-size: 14px;
+            }
+            QPushButton:hover { color: white; }
+        """)
+
         name_input = Search("")
         name_input.setText(name)
         name_input.setMinimumWidth(200)
-        # Connect textChanged to immediate update function
-        name_input.textChanged.connect(
-            lambda: self._on_entry_text_changed(entry_widget))
-        entry_layout.addWidget(name_input, 1)
+        name_input.setReadOnly(True)
 
-        # Equals label
-        equals_label = QLabel("=")
-        equals_label.setObjectName("Caption")
-        equals_label.setAlignment(Qt.AlignCenter)
-        equals_label.setFixedWidth(20)
-        entry_layout.addWidget(equals_label)
+        header_layout.addWidget(toggle_btn)
+        header_layout.addWidget(name_input, 1)
+        header_layout.addStretch()
 
-        # Flag value input
-        value_input = Search("")
-        value_input.setText(value)
-        value_input.setMinimumWidth(200)
-        # Connect textChanged to immediate update function
-        value_input.textChanged.connect(
-            lambda: self._on_entry_text_changed(entry_widget))
-        entry_layout.addWidget(value_input, 1)
-
-        # Delete button
         delete_btn = QPushButton("×")
-        delete_btn.setObjectName("GhostButton")
         delete_btn.setFixedSize(30, 30)
         delete_btn.setStyleSheet("""
             QPushButton {
@@ -2737,377 +4026,836 @@ class FFlagEditorWidget(QWidget):
             }
         """)
         delete_btn.clicked.connect(
-            lambda: self._delete_flag_entry(entry_widget))
-        entry_layout.addWidget(delete_btn)
+            lambda _=False, i=index: self._delete_collection_index(i)
+        )
+        header_layout.addWidget(delete_btn)
 
-        # Store references for easy access
+        # add header widget to the row layout
+        entry_layout.addWidget(header_widget)
+
+        # Details
+        details_widget = QWidget()
+        details_layout = QVBoxLayout(details_widget)
+        details_layout.setContentsMargins(32, 4, 4, 4)
+        details_layout.setSpacing(2)
+
+        if items:
+            for item in items:
+                if isinstance(item, dict):
+                    label_text = f"- {item.get('name', '')} = {item.get('hash', '')}"
+                else:
+                    label_text = f"- {item}"
+                lbl = QLabel(label_text)
+                lbl.setObjectName("Caption")
+                details_layout.addWidget(lbl)
+        else:
+            placeholder = QLabel("Empty collection")
+            placeholder.setObjectName("Caption")
+            details_layout.addWidget(placeholder)
+
+        details_widget.setVisible(False)
+        entry_layout.addWidget(details_widget)
+
+        # stash refs
+        entry_widget.toggle_btn = toggle_btn
+        entry_widget.details_widget = details_widget
         entry_widget.name_input = name_input
-        entry_widget.value_input = value_input
-        entry_widget.original_name = name  # Track original name for updates
+        entry_widget.header_widget = header_widget
+
+        toggle_btn.clicked.connect(
+            lambda _=False, w=entry_widget: self._toggle_collection_details(w)
+        )
 
         return entry_widget
 
-    def _on_entry_text_changed(self, entry_widget):
-        """Handle when entry text changes - update flags immediately"""
-        old_name = entry_widget.original_name
-        new_name = entry_widget.name_input.text().strip()
-        new_value = entry_widget.value_input.text().strip()
+    def _toggle_collection_details(self, entry_widget):
+        visible = entry_widget.details_widget.isVisible()
+        entry_widget.details_widget.setVisible(not visible)
+        entry_widget.toggle_btn.setText("▾" if not visible else "▸")
 
-        # Remove old entry if name changed
-        if old_name != new_name and old_name in self.flags:
-            del self.flags[old_name]
-
-        # Add/update new entry
-        if new_name:
-            self.flags[new_name] = new_value
-            entry_widget.original_name = new_name
-
-    def _delete_flag_entry(self, entry_widget):
-        """Delete a flag entry"""
-        if entry_widget in self.flag_entries:
-            # Remove from flags dict
-            name = entry_widget.original_name
-            if name in self.flags:
-                del self.flags[name]
-            # Remove from UI
-            self.flag_entries.remove(entry_widget)
-            entry_widget.setParent(None)
-
-    def add_flag(self):
-        name = self.flag_name_input.text().strip()
-        value = self.flag_value_input.text().strip()
-        if not name:
-            self.status_label.setText("Enter a flag name!")
+    def _on_entry_clicked(self, index: int):
+        """Select a collection row (single-select)."""
+        if index < 0 or index >= len(self.collection_entries):
             return
+        self.selected_index = index
+        self._update_selection_styles()
 
-        # Auto-add _IXPValue suffix if not present and it's a standard flag
-        if name.startswith(('DFFlag', 'FFlag', 'SFFlag')) and not name.endswith('_IXPValue'):
-            name += '_IXPValue'
+    def _update_selection_styles(self):
+        selected_lineedit = """
+            QLineEdit {
+                border: 1px solid #3B82F6;
+                border-radius: 10px;
+                background-color: rgba(59, 130, 246, 40);
+            }
+        """
 
-        # Don't allow adding default flags
-        if name in self.default_flags:
-            self.status_label.setText(
-                f"{name} is a default flag and cannot be added!")
-            return
+        unselected_lineedit = """
+            QLineEdit {
+                border: 1px solid rgba(255,255,255,26);
+                border-radius: 10px;
+                background-color: transparent;
+            }
+        """
 
-        # Check if flag already exists
-        existing_entry = None
-        for entry in self.flag_entries:
-            if entry.name_input.text().strip() == name:
-                existing_entry = entry
-                break
-
-        if existing_entry:
-            # Flag already exists - ask if user wants to overwrite
-            from PySide6.QtWidgets import QMessageBox
-            reply = QMessageBox.question(
-                self,
-                "Flag Already Exists",
-                f"The flag '{name}' already exists with value '{existing_entry.value_input.text()}'.\n\nWould you like to overwrite it with the new value '{value}'?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-
-            if reply == QMessageBox.Yes:
-                # Update existing entry
-                existing_entry.value_input.setText(value)
-                self.flags[name] = value
-                self.status_label.setText(f"Updated {name}")
+        for i, w in enumerate(self.collection_entries):
+            header = getattr(w, "header_widget", None)
+            if i == self.selected_index:
+                if header is not None:
+                    header.setStyleSheet("""
+                        QWidget#CollectionHeader {
+                            background-color: rgba(59, 130, 246, 35);
+                            border-radius: 8px;
+                        }
+                    """)
+                w.name_input.setStyleSheet(selected_lineedit)
             else:
-                self.status_label.setText("Operation cancelled")
+                if header is not None:
+                    header.setStyleSheet("""
+                        QWidget#CollectionHeader {
+                            background-color: transparent;
+                            border-radius: 8px;
+                        }
+                    """)
+                w.name_input.setStyleSheet(unselected_lineedit)
 
-            # Clear inputs either way
-            self.flag_name_input.clear()
-            self.flag_value_input.clear()
+    def _delete_collection_index(self, index: int):
+        if 0 <= index < len(self.collections):
+            self.collections.pop(index)
+
+            if self.selected_index == index:
+                self.selected_index = -1
+            elif self.selected_index > index:
+                self.selected_index -= 1
+
+            self._save_collections()
+            self._rebuild_collection_ui()
+
+    # button actions
+    def apply_collection(self):
+        """Send selected collection's caches back into CacheLoaderWidget."""
+        if self.selected_index < 0 or self.selected_index >= len(self.collections):
+            print("Apply Collection: no collection selected")
             return
 
-        # Create new flag entry (flag doesn't exist yet)
-        entry_widget = self._create_flag_entry(name, value)
-        self.flag_entries.append(entry_widget)
-        self.flags_layout.addWidget(entry_widget)
+        col = self.collections[self.selected_index]
+        items = col.get("items", [])
 
-        # Add to flags dict
-        self.flags[name] = value
-
-        # Clear inputs
-        self.flag_name_input.clear()
-        self.flag_value_input.clear()
-
-        self.status_label.setText(f"Added {name}")
-
-    def import_json(self):
-        json_text = self.json_input.toPlainText().strip()
-        if not json_text:
-            self.status_label.setText("Paste JSON data to import")
+        if not items:
+            print("Apply Collection: selected collection is empty")
             return
 
-        try:
-            data = json.loads(json_text)
-            added = 0
-            updated = 0
-            skipped = 0
+        if self.apply_caches:
+            self.apply_caches(items)
+            print(f"Applied collection: {col.get('name', 'Unnamed')}")
 
-            if isinstance(data, dict):
-                for k, v in data.items():
-                    if str(k) in self.default_flags:
-                        skipped += 1
-                        continue
+    def create_collection(self):
+        if not self.get_caches:
+            print("No cache callback wired into CollectionsWidget")
+            return
 
-                    # Check if flag already exists in entries
-                    existing_entry = None
-                    for entry in self.flag_entries:
-                        if entry.name_input.text().strip() == str(k):
-                            existing_entry = entry
-                            break
+        caches = self.get_caches() or []
+        if not caches:
+            print("No caches selected / loaded to save into a collection.")
+            return
 
-                    if existing_entry:
-                        # Update existing entry
-                        existing_entry.value_input.setText(str(v))
-                        self.flags[str(k)] = str(v)
-                        updated += 1
-                    else:
-                        # Create new entry
-                        entry_widget = self._create_flag_entry(str(k), str(v))
-                        self.flag_entries.append(entry_widget)
-                        self.flags_layout.addWidget(entry_widget)
-                        self.flags[str(k)] = str(v)
-                        added += 1
+        default_name = f"Collection {len(self.collections) + 1}"
+        name, ok = QInputDialog.getText(
+            self, "Create Collection", "Collection name:", text=default_name
+        )
+        if not ok:
+            return
+        name = (name or default_name).strip() or default_name
 
-            elif isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict):
-                        for k, v in item.items():
-                            if str(k) in self.default_flags:
-                                skipped += 1
-                                continue
+        self.collections.append({
+            "name": name,
+            "items": caches,   # list of {"name","hash"}
+        })
+        self._save_collections()
+        self._rebuild_collection_ui()
+        print(f"Created collection: {name}")
 
-                            # Check if flag already exists
-                            existing_entry = None
-                            for entry in self.flag_entries:
-                                if entry.name_input.text().strip() == str(k):
-                                    existing_entry = entry
-                                    break
+    def delete_collection(self):
+        if not self.collections:
+            return
+        last_index = len(self.collections) - 1
+        self.collections.pop()
+        if self.selected_index >= last_index:
+            self.selected_index = -1
+        self._save_collections()
+        self._rebuild_collection_ui()
+        print("Delete collection clicked")
 
-                            if existing_entry:
-                                # Update existing entry
-                                existing_entry.value_input.setText(str(v))
-                                self.flags[str(k)] = str(v)
-                                updated += 1
-                            else:
-                                # Create new entry
-                                entry_widget = self._create_flag_entry(
-                                    str(k), str(v))
-                                self.flag_entries.append(entry_widget)
-                                self.flags_layout.addWidget(entry_widget)
-                                self.flags[str(k)] = str(v)
-                                added += 1
+    def refresh_collections(self):
+        self._load_collections()
+        if self.selected_index >= len(self.collections):
+            self.selected_index = -1
+        self._rebuild_collection_ui()
+        print("Collections reloaded from disk")
 
-            if added > 0 or updated > 0:
-                status_msg = []
-                if added > 0:
-                    status_msg.append(f"Added {added} flags")
-                if updated > 0:
-                    status_msg.append(f"updated {updated} flags")
-                if skipped > 0:
-                    status_msg.append(f"{skipped} default flags skipped")
-                self.status_label.setText(" • ".join(status_msg))
-                self.json_input.clear()
-            else:
-                self.status_label.setText("No valid flags found in JSON")
+# Cache Finder Widget
 
-        except json.JSONDecodeError:
-            # Try regex parsing for loose format
-            import re
-            pattern = r'"([^"]+)"\s*:\s*"([^"]*)"'
-            matches = re.findall(pattern, json_text)
-            added = 0
-            updated = 0
-            skipped = 0
 
-            if matches:
-                for name, value in matches:
-                    if name in self.default_flags:
-                        skipped += 1
-                        continue
+def extract_asset_hash(url: str) -> str:
+    """
+    Extract the asset ID from a URL like:
+    fts.rbxcdn.com/sc5/509f6133bf6be400729363b38fb7c148?encoding=gzip
+    Returns '509f6133bf6be400729363b38fb7c148'
+    """
+    try:
+        path = url.split("?")[0]  # remove query
+        parts = path.split("/")    # split by slash
+        return parts[-1]           # last part is ID
+    except Exception:
+        return url  # fallback to full URL if parsing fails
 
-                    # Check if flag already exists
-                    existing_entry = None
-                    for entry in self.flag_entries:
-                        if entry.name_input.text().strip() == name:
-                            existing_entry = entry
-                            break
 
-                    if existing_entry:
-                        # Update existing entry
-                        existing_entry.value_input.setText(value)
-                        self.flags[name] = value
-                        updated += 1
-                    else:
-                        # Create new entry
-                        entry_widget = self._create_flag_entry(name, value)
-                        self.flag_entries.append(entry_widget)
-                        self.flags_layout.addWidget(entry_widget)
-                        self.flags[name] = value
-                        added += 1
+class AssetNameFetcher(QObject):
+    finished = Signal(str, object)  # asset_id, name or None
 
-                if added > 0 or updated > 0:
-                    status_msg = []
-                    if added > 0:
-                        status_msg.append(f"Added {added} flags")
-                    if updated > 0:
-                        status_msg.append(f"updated {updated} flags")
-                    if skipped > 0:
-                        status_msg.append(f"{skipped} default flags skipped")
-                    self.status_label.setText(" • ".join(status_msg))
-                    self.json_input.clear()
+    def __init__(self, asset_id: str, cookie: str, max_retries: int = 3, retry_delay: float = 1.0):
+        """
+        :param asset_id: Roblox asset ID to fetch
+        :param cookie: .ROBLOSECURITY cookie string
+        :param max_retries: number of retries on failure
+        :param retry_delay: seconds to wait before retry
+        """
+        super().__init__()
+        self.asset_id = asset_id
+        self.cookie = cookie
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self._thread = threading.Thread(target=self.run)
+        self._thread.daemon = True  # won't block app exit
+
+    def start(self):
+        self._thread.start()
+
+    def run(self):
+        attempt = 0
+        name = None
+
+        while attempt < self.max_retries:
+            attempt += 1
+            try:
+                url = f"https://develop.roblox.com/v1/assets?assetIds={self.asset_id}"
+                headers = {
+                    "Cookie": f".ROBLOSECURITY={self.cookie}",
+                    "User-Agent": "Roblox/WinInet"
+                }
+                resp = requests.get(url, headers=headers, timeout=5)
+                resp.raise_for_status()
+                data = resp.json().get("data", [])
+                if data:
+                    name = data[0].get("name")
+                break  # success, exit loop
+            except Exception as e:
+                print(
+                    f"[ASSET NAME] Attempt {attempt} failed for {self.asset_id}: {e}")
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay)  # wait before retry
                 else:
-                    self.status_label.setText(
-                        "Only default flags found - none imported")
-            else:
-                self.status_label.setText("Invalid JSON format")
+                    name = None
 
-    def load_from_roblox(self):
-        try:
-            home_dir = os.path.expanduser("~")
-            file_path = os.path.join(
-                home_dir, r"AppData\Local\Roblox\ClientSettings\IxpSettings.json")
+        self.finished.emit(self.asset_id, name)
 
-            if not os.path.exists(file_path):
-                self.status_label.setText("No Roblox settings file found")
-                return
 
-            with open(file_path, 'r', encoding='utf-8') as f:
-                file_data = json.load(f)
+class CacheFinderWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self._name_fetch_threads = {}  # asset_id -> QThread
+        self._delayed_rows = {}  # key: request ID, value: row widget
+        self._asset_name_cache = {}  # asset_id -> name or None
+        self._selected_row = None
+        self._selected_request_data = None  # stores dict of last selected request
+        self.filter_mode = "All"
+        self._build_ui()
+        self.start_delayed_request_sync()
 
-            # Load ONLY differences from defaults - this is the key part!
-            loaded = 0
-            for key, file_value in file_data.items():
-                # Skip if it's a default flag with default value
-                if key in self.default_flags and self.default_flags[key] == file_value:
-                    continue
+        self.setStyleSheet("""
+            QWidget#resultRow {
+                border: 1px solid transparent;
+                border-radius: 6px;
+            }
+            QWidget#resultRow[selected="true"] {
+                border: 2px solid #3b82f6;
+            }
+        """)
 
-                # Check if flag already exists in entries
-                exists = False
-                for entry in self.flag_entries:
-                    if entry.name_input.text().strip() == key:
-                        exists = True
+    # small helpers
+
+    def _clear_results(self):
+        while self.results_layout.count():
+            item = self.results_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
+    def _add_result_row(self, text: str):
+        row = QWidget(self.results_host)
+        row.setObjectName("resultRow")
+
+        row.mousePressEvent = lambda e, r=row: self._select_row(r)
+
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(0)
+
+        line = Search("")
+        line.setReadOnly(True)
+        line.setFocusPolicy(Qt.NoFocus)
+        line.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        line.setStyleSheet("""
+            QLineEdit {
+                border-radius: 10px;
+                border: 1px solid rgba(255,255,255,26);
+                background-color: transparent;
+                padding: 9px 12px;
+                selection-background-color: #2563EB;
+                selection-color: white;
+                min-height: 16px;
+                max-height: 16px;
+            }
+        """)
+
+        line.setText(" ".join(text.splitlines()))
+
+        row_layout.addWidget(line)
+
+        self.results_layout.insertWidget(
+            self.results_layout.count() - 1, row
+        )
+
+        return row  # return the widget for tracking
+
+    def add_delayed_request_row(self, request_id: str, url: str, asset_id: str):
+        if request_id in self._delayed_rows:
+            return  # already exists
+
+        asset_hash = extract_asset_hash(url)
+
+        display_right = asset_hash  # default: show hash
+        text = f"{asset_id} → {display_right}"
+
+        row = self._add_result_row(text)
+
+        # Persist data
+        row.request_id = request_id       # store the request ID
+        row.asset_id = asset_id
+        row.asset_hash = asset_hash
+        row.asset_name = None  # not fetched yet
+        row.full_url = url
+
+        # Clicking the row updates Current API and Hash boxes
+        row.mousePressEvent = lambda e, r=row: self._select_row_and_set_current(
+            r)
+
+        self._delayed_rows[request_id] = row
+
+        if self.show_names_checkbox.isChecked():
+            self._ensure_asset_name_async(asset_id)
+            line_edit = row.findChild(QLineEdit)
+            if line_edit:
+                line_edit.setText(f"{asset_id} → Loading…")
+
+    def _select_row_and_set_current(self, row):
+        self._select_row(row)
+
+        # Update the top status boxes
+        self.api_status.setText(row.full_url)
+        self.api_status.setCursorPosition(0)
+        self.id_status.setText(row.asset_id)  # short asset ID
+
+    def remove_delayed_request_row(self, request_id: str):
+        row = self._delayed_rows.pop(request_id, None)
+        if row:
+            # Clear selection if this row was selected
+            if getattr(self, "_selected_row", None) is row:
+                self._selected_row = None
+
+            self.results_layout.removeWidget(row)
+            row.setParent(None)
+            row.deleteLater()
+
+    def start_delayed_request_sync(self):
+        self._sync_timer = QTimer(self)
+        self._sync_timer.timeout.connect(self.sync_delayed_requests)
+        self._sync_timer.start(500)  # check every 0.5 seconds
+
+    def sync_delayed_requests(self):
+        global DELAY_REQUESTS_LIST
+
+        # Add new delayed requests
+        for key, flow in list(DELAY_REQUESTS_LIST.items()):
+            if key not in self._delayed_rows:
+                url = getattr(flow.request, "pretty_url", str(flow))
+                asset_id = None
+                req_base = url.split("?")[0]
+
+                # Search CACHELOGS for a matching location
+                for id_, info in CACHELOGS.items():
+                    if not isinstance(info, dict):
+                        continue
+                    location = info.get("location")
+                    if not location:
+                        continue
+                    cached_base = location.split("?")[0]
+                    if cached_base == req_base:
+                        asset_id = id_  # use the index/key from CACHELOGS
                         break
 
-                if not exists:  # Only add if not already present
-                    entry_widget = self._create_flag_entry(
-                        key, str(file_value))
-                    self.flag_entries.append(entry_widget)
-                    self.flags_layout.addWidget(entry_widget)
-                    self.flags[key] = str(file_value)
-                    loaded += 1
+                asset_type_name = str(
+                    asset_id) if asset_id is not None else "Unknown"
+                self.add_delayed_request_row(key, url, asset_type_name)
 
-            self.status_label.setText(
-                f"Loaded {loaded} custom flags from Roblox")
+        # Remove rows that no longer exist in the global list
+        for key in list(self._delayed_rows.keys()):
+            if key not in DELAY_REQUESTS_LIST:
+                self.remove_delayed_request_row(key)
+
+    def _select_row(self, row: QWidget):
+        # Clear previous selection
+        if getattr(self, "_selected_row", None):
+            self._selected_row.setProperty("selected", False)
+            self._selected_row.style().unpolish(self._selected_row)
+            self._selected_row.style().polish(self._selected_row)
+
+        # Mark new selection
+        self._selected_row = row
+        row.setProperty("selected", True)
+        row.style().unpolish(row)
+        row.style().polish(row)
+
+        # Store the request data for future reference
+        self._selected_request_data = {
+            "request_id": getattr(row, "request_id", None),
+            "asset_id": getattr(row, "asset_id", None),
+            "asset_hash": getattr(row, "asset_hash", None),
+            "asset_name": getattr(row, "asset_name", None),
+            "full_url": getattr(row, "full_url", None),
+        }
+
+        # Update UI top boxes
+        self.api_status.setText(self._selected_request_data["full_url"] or "")
+        self.api_status.setCursorPosition(0)
+        self.id_status.setText(self._selected_request_data["asset_id"] or "")
+
+    def _set_finder_message(self, text: str):
+        """Convenience to show a single message in the results list."""
+        self._clear_results()
+        self._add_result_row(text)
+
+    def _append_log_entry(self, text: str):
+        """Append a new line to the cache finder log without clearing it."""
+        self._add_result_row(text)
+
+    def get_roblosecurity(self):
+        path = os.path.expandvars(
+            r"%LocalAppData%/Roblox/LocalStorage/RobloxCookies.dat")
+        try:
+            if not os.path.exists(path):
+                return None
+            with open(path, "r") as f:
+                data = json.load(f)
+            cookies_data = data.get("CookiesData")
+            if not cookies_data or not win32crypt:
+                return None
+            enc = base64.b64decode(cookies_data)
+            dec = win32crypt.CryptUnprotectData(enc, None, None, None, 0)[1]
+            s = dec.decode(errors="ignore")
+            m = re.search(r"\.ROBLOSECURITY\s+([^\s;]+)", s)
+            return m.group(1) if m else None
+        except Exception:
+            return None
+
+    def _fetch_asset_name(self, asset_id: str) -> str | None:
+        if not asset_id or asset_id in self._asset_name_cache:
+            return self._asset_name_cache.get(asset_id)
+
+        cookie = self.get_roblosecurity()
+        if not cookie:
+            self._asset_name_cache[asset_id] = None
+            return None
+
+        try:
+            url = f"https://develop.roblox.com/v1/assets?assetIds={asset_id}"
+            headers = {
+                "Cookie": f".ROBLOSECURITY={cookie}",
+                "User-Agent": "Roblox/WinInet"
+            }
+
+            resp = requests.get(url, headers=headers, timeout=5)
+            resp.raise_for_status()
+
+            data = resp.json().get("data", [])
+            if not data:
+                self._asset_name_cache[asset_id] = None
+                return None
+
+            name = data[0].get("name")
+            self._asset_name_cache[asset_id] = name
+            return name
 
         except Exception as e:
-            self.status_label.setText(f"Load error: {str(e)[:50]}...")
+            print(f"[ASSET NAME] Failed for {asset_id}: {e}")
+            self._asset_name_cache[asset_id] = None
+            return None
 
-    def refresh_flags(self):
-        """Refresh the flag list by reloading from Roblox"""
-        # Clear current flags
-        for entry in self.flag_entries[:]:
-            entry.setParent(None)
+    def _update_log_hash_visibility(self, checked: bool):
+        for row in self._delayed_rows.values():
+            asset_id = row.asset_id
 
-        self.flag_entries.clear()
-        self.flags.clear()
+            if checked:
+                # Trigger async fetch if missing
+                if row.asset_name is None:
+                    self._ensure_asset_name_async(asset_id)
+                    display = "Loading…"
+                else:
+                    display = row.asset_name
+            else:
+                display = row.asset_hash
 
-        # Reload from Roblox
-        self._load_flags()
-        self.status_label.setText("Refreshed flags from Roblox")
+            line_edit = row.findChild(QLineEdit)
+            if line_edit:
+                line_edit.setText(f"{asset_id} → {display}")
 
-    def clear_flags(self):
-        if not self.flag_entries:
-            self.status_label.setText("No flags to clear")
+    def _ensure_asset_name_async(self, asset_id: str):
+        if asset_id in self._asset_name_cache:
             return
 
-        count = len(self.flag_entries)
+        cookie = self.get_roblosecurity()
+        if not cookie:
+            self._asset_name_cache[asset_id] = None
+            return
 
-        # Remove all entry widgets
-        for entry in self.flag_entries[:]:
-            entry.setParent(None)
+        fetcher = AssetNameFetcher(asset_id, cookie)
+        fetcher.finished.connect(self._on_asset_name_fetched)
+        fetcher.start()
 
-        self.flag_entries.clear()
-        self.flags.clear()
-        self.status_label.setText(f"Cleared {count} flags")
+    def _on_asset_name_fetched(self, asset_id: str, name: str | None):
+        print(f"[ASSET NAME] Fetched name for {asset_id}: {name}")
+        self._asset_name_cache[asset_id] = name or "Unknown asset"
+        self._name_fetch_threads.pop(asset_id, None)  # remove reference
 
-    def _load_flags(self):
-        """Load flags that differ from defaults (like original does)"""
-        try:
-            home_dir = os.path.expanduser("~")
-            file_path = os.path.join(
-                home_dir, r"AppData\Local\Roblox\ClientSettings\IxpSettings.json")
-            if os.path.exists(file_path):
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    file_data = json.load(f)
+        if not self.show_names_checkbox.isChecked():
+            return
 
-                # Only load flags that differ from defaults (matching original logic)
-                for key, file_value in file_data.items():
-                    if key not in self.default_flags or self.default_flags[key] != file_value:
-                        entry_widget = self._create_flag_entry(
-                            key, str(file_value))
-                        self.flag_entries.append(entry_widget)
-                        self.flags_layout.addWidget(entry_widget)
-                        self.flags[key] = str(file_value)
+        for row in self._delayed_rows.values():
+            if row.asset_id == asset_id:
+                row.asset_name = name or "Unknown asset"
+                line_edit = row.findChild(QLineEdit)
+                if line_edit:
+                    line_edit.setText(f"{asset_id} → {row.asset_name}")
 
-                if self.flags:
-                    self.status_label.setText(
-                        f"Loaded {len(self.flags)} custom flags from Roblox")
-        except Exception as e:
-            self.status_label.setText(f"Load error: {str(e)[:50]}...")
+    # UI build
 
-    def save_flags(self):
-        try:
-            home_dir = os.path.expanduser("~")
-            roblox_path = os.path.join(home_dir, r"AppData\Local\Roblox")
-            file_path = os.path.join(
-                roblox_path, r"ClientSettings\IxpSettings.json")
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 15, 0, 0)
+        layout.setSpacing(15)
 
-            if not os.path.exists(roblox_path):
-                self.status_label.setText(
-                    "Roblox not found - please install Roblox first")
-                return
+        # Top "Cache Finder" status card
+        status_card = Card("Cache Finder")
+        status_layout = QVBoxLayout()
+        status_layout.setSpacing(10)
 
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        # Current API and hash info
+        info_layout = QGridLayout()
+        info_layout.setSpacing(8)
 
-            # IMPORTANT: DON'T read existing settings! Only use defaults + custom flags
-            # This ensures that when you clear custom flags, they actually get removed
-            # Instead of being preserved from the existing file
+        info_layout.addWidget(QLabel("Current API in queue:"), 0, 0)
+        self.api_status = Search("")
+        self.api_status.setReadOnly(True)
+        self.api_status.setText("No API in queue")
+        info_layout.addWidget(self.api_status, 0, 1)
 
-            # Merge: defaults + user flags ONLY (user flags take priority)
-            merged_data = {**self.default_flags, **self.flags}
+        info_layout.addWidget(QLabel("Current id:"), 1, 0)
+        self.id_status = Search("")
+        self.id_status.setReadOnly(True)
+        self.id_status.setText("No id")
+        info_layout.addWidget(self.id_status, 1, 1)
 
-            # Write to file with proper permissions
+        status_layout.addLayout(info_layout)
+
+        # Auto-progress + filter row
+        progress_layout = QHBoxLayout()
+        progress_layout.setSpacing(8)
+
+        self.auto_progress_btn = GhostButton("Stop Auto-progress")
+        self.auto_progress_btn.setCheckable(True)
+        progress_layout.addWidget(self.auto_progress_btn)
+
+        progress_layout.addWidget(QLabel("Filter:"))
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItem("All")
+        self.filter_combo.addItems(asset_types.values())
+
+        self.filter_combo.setCurrentIndex(0)
+        self.filter_combo.setMinimumWidth(130)
+
+        def on_filter_changed(index):
+            global CURRENT_FILTER
+            CURRENT_FILTER = self.filter_combo.currentText()
+            print(f"[FILTER] CURRENT_FILTER updated: {CURRENT_FILTER}")
+
+        self.filter_combo.currentIndexChanged.connect(on_filter_changed)
+
+        progress_layout.addWidget(self.filter_combo)
+
+        self.show_names_checkbox = QCheckBox("Show names")
+        self.show_names_checkbox.setChecked(False)
+        self.show_names_checkbox.setStyleSheet("""
+            QCheckBox {
+                background: transparent;
+            }
+
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 3px;
+                background: rgba(0,0,0,40);
+                border: 1px solid rgba(255,255,255,120);
+            }
+
+            QCheckBox::indicator:checked {
+                background: #3B82F6;
+                border: 1px solid #3B82F6;
+                image: url(:/qt-project.org/styles/commonstyle/images/checkmark.png);
+            }
+
+            QCheckBox::indicator:unchecked {
+                image: none;
+            }
+        """)
+        self.show_names_checkbox.toggled.connect(
+            self._update_log_hash_visibility)
+        progress_layout.addWidget(self.show_names_checkbox)
+
+        progress_layout.addStretch()
+        status_layout.addLayout(progress_layout)
+
+        status_card.body().addLayout(status_layout)
+        layout.addWidget(status_card)
+
+        # "Cache Results" log card
+        finder_card = Card("Cache Results")
+
+        # scroll area so the log doesn't grow forever
+        self.results_scroll = QScrollArea()
+        self.results_scroll.setWidgetResizable(True)
+        self.results_scroll.setFrameShape(QFrame.NoFrame)
+
+        # host widget inside the scroll area
+        self.results_host = QWidget()
+        self.results_layout = QVBoxLayout(self.results_host)
+        self.results_layout.setContentsMargins(8, 8, 8, 8)
+        self.results_layout.setSpacing(10)
+
+        # keep rows packed at the top
+        self.results_layout.addStretch()
+
+        self.results_scroll.setWidget(self.results_host)
+        finder_card.body().addWidget(self.results_scroll, 1)
+        layout.addWidget(finder_card, 1)
+        # self._add_result_row("Cache Finder initialized.")
+        # self._add_result_row("Cached")
+        # self._add_result_row("Cache sss")
+
+        # Bottom buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(12)
+
+        self.delete_db_btn = GhostButton("Delete DB")
+        self.progress_api_btn = AccentButton("Progress 1 API request")
+        self.progress_all_btn = GhostButton("Progress all")
+        self.download_hash_btn = GhostButton("Download hash")
+        self.copy_hash_contents_btn = GhostButton("Copy hash contents")
+
+        self.download_hash_btn.clicked.connect(self.download_hash)
+        self.copy_hash_contents_btn.clicked.connect(self.copy_hash_contents)
+
+        btn_layout.addWidget(self.delete_db_btn)
+        btn_layout.addWidget(self.progress_api_btn)
+        btn_layout.addWidget(self.progress_all_btn)
+        btn_layout.addWidget(self.download_hash_btn)
+        btn_layout.addWidget(self.copy_hash_contents_btn)
+        btn_layout.addStretch()
+
+        layout.addLayout(btn_layout)
+
+        # Connect buttons / filter
+        self.delete_db_btn.clicked.connect(self.delete_db)
+        self.progress_api_btn.clicked.connect(self.progress_one_api)
+        self.progress_all_btn.clicked.connect(self.progress_all)
+        self.auto_progress_btn.clicked.connect(self.toggle_auto_progress)
+        self.filter_combo.currentIndexChanged.connect(self._on_filter_changed)
+        self.download_hash_btn.clicked.connect(lambda: None)
+        self.copy_hash_contents_btn.clicked.connect(lambda: None)
+
+    # button handlers (updated to use _set_finder_message)
+
+    def _on_filter_changed(self, index: int):
+        """Handle changes in the filter dropdown."""
+        mode = self.filter_combo.currentText()
+        print(f"Cache Finder filter changed to: {mode}")
+        # blockceeeeeeeee
+        # e.g. re-render self.results_layout based on `mode`
+
+    def delete_db(self):
+        base = Path(os.getenv("LOCALAPPDATA") or "") / "Roblox"
+        candidates = []
+        for root, _, files in os.walk(base):
+            for f in files:
+                if f.lower().endswith((".db", ".sqlite")):
+                    candidates.append(str(Path(root) / f))
+        if not candidates:
+            QMessageBox.information(
+                self, "No DBs", "No .db/.sqlite files found under LocalAppData\\Roblox")
+            return
+        if QMessageBox.question(self, "Delete", f"Delete {len(candidates)} database file(s)?") != QMessageBox.Yes:
+            return
+        deleted = 0
+        for p in candidates:
             try:
-                os.chmod(file_path, stat.S_IWRITE)
-            except:
-                pass
+                os.remove(p)
+                deleted += 1
+            except Exception as e:
+                print("Failed:", p, e)
+        QMessageBox.information(self, "Done", f"Deleted {deleted} file(s).")
 
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(merged_data, f, indent=4)
+    def progress_one_api(self):
+        global DELAY_REQUESTS_LIST
 
-            try:
-                os.chmod(file_path, stat.S_IREAD)
-            except:
-                pass
+        if not DELAY_REQUESTS_LIST:
+            print("[DELAY] No delayed requests to send")
+            return
 
-            # Status message
-            user_flags_count = len(self.flags)
-            if user_flags_count == 0:
-                self.status_label.setText(
-                    "Saved - reset to default flags only")
-            else:
-                self.status_label.setText(
-                    f"Saved {user_flags_count} custom flags")
+        # Determine which request to forward
+        selected_key = None
+        if getattr(self, "_selected_row", None):
+            selected_row = self._selected_row
+            for key, row in self._delayed_rows.items():
+                if row is selected_row:
+                    selected_key = key
+                    break
 
+        # If no selected row or key not found, pick the oldest request
+        if not selected_key:
+            selected_key = next(iter(DELAY_REQUESTS_LIST))
+
+        # Before removing the row, store its data as the last selected request
+        row = self._delayed_rows.get(selected_key)
+        if row:
+            self._selected_request_data = {
+                "request_id": getattr(row, "request_id", None),
+                "asset_id": getattr(row, "asset_id", None),
+                "asset_hash": getattr(row, "asset_hash", None),
+                "asset_name": getattr(row, "asset_name", None),
+                "full_url": getattr(row, "full_url", None),
+            }
+
+            # Update the top UI boxes BEFORE removal
+            self.api_status.setText(
+                self._selected_request_data["full_url"] or "")
+            self.api_status.setCursorPosition(0)
+            self.id_status.setText(
+                self._selected_request_data["asset_id"] or "")
+
+        # Send the request
+        send_delayed_request(selected_key)
+
+        # Remove its row from the UI
+        self.remove_delayed_request_row(selected_key)
+
+    def progress_all(self):
+        if not DELAY_REQUESTS_LIST:
+            print("[DELAY] No delayed requests to send")
+            return
+
+        send_all_delayed_requests()
+
+        # Remove all rows from UI
+        for key in list(self._delayed_rows.keys()):
+            self.remove_delayed_request_row(key)
+
+    def toggle_auto_progress(self, checked):
+        if checked:
+            self.auto_progress_btn.setText("Auto-progress queue")
+            set_delay_requests(True)
+            print("Auto-progress disabled")
+        else:
+            self.auto_progress_btn.setText("Stop auto-progress")
+            set_delay_requests(False)
+            print("Auto-progress enabled")
+
+    # --- Download hash button ---
+
+    def download_hash(self):
+        if not self._selected_request_data:
+            print("[DOWNLOAD HASH] No request selected")
+            return
+
+        url = self._selected_request_data.get("full_url")
+        asset_hash = self._selected_request_data.get("asset_hash")
+        if not url or not asset_hash:
+            print("[DOWNLOAD HASH] Missing URL or hash")
+            return
+
+        try:
+            response = requests.get(url, timeout=5)  # just a copy
+
+            # Downloads folder path
+            downloads_dir = Path.home() / "Downloads"
+            downloads_dir.mkdir(exist_ok=True)  # ensure it exists
+            file_path = downloads_dir / asset_hash  # file name is just the hash
+
+            with open(file_path, "wb") as f:
+                f.write(response.content)
+
+            print(f"[DOWNLOAD HASH] Response saved to {file_path}")
         except Exception as e:
-            self.status_label.setText(f"Save error: {str(e)[:50]}...")
+            print(f"[DOWNLOAD HASH] Failed: {e}")
 
-# ==================== Main Application Entry Point ====================
+    # --- Copy hash contents button ---
+
+    def copy_hash_contents(self):
+        if not self._selected_request_data:
+            print("[COPY CONTENT] No request selected")
+            return
+
+        url = self._selected_request_data.get("full_url")
+        if not url:
+            print("[COPY CONTENT] No URL available")
+            return
+
+        try:
+            response = requests.get(url, timeout=5)
+            QApplication.clipboard().setText(response.text)
+            print(f"[COPY CONTENT] Response copied to clipboard")
+        except Exception as e:
+            print(f"[COPY CONTENT] Failed: {e}")
+
+
+# Main Application Entry Point
+
+
+async def pr():
+    while True:
+        # for src, lst in CACHES_BY_SOURCE.items():
+        # for cache in lst:
+        # print({
+        #    k: v for k, v in cache.items()
+        #    if k != "widget"
+        # })
+        await asyncio.sleep(1)
+
+
+def start_asyncio_loop():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.create_task(pr())
+    loop.run_forever()
 
 
 def main():
@@ -3126,7 +4874,7 @@ def main():
     # Create and show main window
     window = Window()
     window.show()
-
+    threading.Thread(target=start_asyncio_loop, daemon=True).start()
     # Run the application
     sys.exit(app.exec())
 
