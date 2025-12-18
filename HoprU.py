@@ -2341,6 +2341,20 @@ class Interceptor:
 
         response_base = url.split("?")[0]
         # print(response_base)
+        def extract_roblox_block(data: bytes) -> bytes:
+            start_tag = b"<roblox"
+            end_tag = b"</roblox>"
+
+            start = data.find(start_tag)
+            end = data.find(end_tag)
+
+            if start == -1 or end == -1:
+                return data  # tags not found, return original
+
+            end += len(end_tag)
+            return data[start:end]
+
+
         for ID, info in CACHELOGS.items():
             if "location" in info:
                 cached_base = info["location"].split("?")[0]
@@ -2360,8 +2374,8 @@ class Interceptor:
 
                         # Case: replace by hash
                         elif replace_kind == "hash":
-                            current_hash = base64.b64encode(
-                                flow.response.content).decode("ascii")
+                            trimmed = extract_roblox_block(flow.response.content)
+                            current_hash = base64.b64encode(trimmed).decode("ascii")
 
                             # only compare if replace_hash is valid base64
                             if not is_base64(str(replace_hash)):
@@ -2372,8 +2386,7 @@ class Interceptor:
                         return False
 
                     cache_item = next(
-                        (c for c in CACHES_BY_SOURCE.get(
-                            "Default", []) if matches(c)),
+                        (c for c in CACHES_BY_SOURCE.get("Default", []) if matches(c)),
                         None
                     )
 
@@ -2382,19 +2395,21 @@ class Interceptor:
 
                     if cache_item:
 
-                        # Case: ID → we expect binary to be valid base64
+                        # Case: ID → binary replacement (UNCHANGED)
                         if cache_item.get("hash_kind") == "id" and "binary" in cache_item:
                             if is_base64(cache_item["binary"]):
                                 flow.response.content = base64.b64decode(
-                                    cache_item["binary"])
+                                    cache_item["binary"]
+                                )
 
-                        # Case: Hash → use_hash must be valid base64
+                        # Case: Hash → use_hash, trimmed to <roblox> block
                         elif cache_item.get("hash_kind") == "hash" and "use_hash" in cache_item:
                             if is_base64(cache_item["use_hash"]):
-                                flow.response.content = base64.b64decode(
-                                    cache_item["use_hash"])
+                                decoded = base64.b64decode(cache_item["use_hash"])
+                                flow.response.content = extract_roblox_block(decoded)
 
                     break
+
 
         if ENABLE_RESERVED_GAME_JOIN_INTERCEPT == False:
             if (parsed_url.path == "/v1/join-reserved-game" or parsed_url.path == "/v1/join-game"):
@@ -3628,7 +3643,7 @@ class CacheLoaderWidget(QWidget):
                 dlg,
                 "Select file containing hash",
                 "",
-                "Text files (*.txt);;All files (*.*)",
+                "All files (*.*)",
             )
             if not path:
                 return
