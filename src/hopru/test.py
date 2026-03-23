@@ -718,7 +718,7 @@ def _do_auto_update(parent=None):
     exe_name = os.path.basename(current_exe)
     exe_dir = os.path.dirname(current_exe)
 
-    exe_url = "https://github.com/Sky-pluh/Fleasion/releases/latest/download/Fleasion.exe"
+    exe_url = "https://github.com/BLOCKCE/Hopr-Utilities/releases/latest/download/HoprU.exe"
 
     tmp_dir = tempfile.mkdtemp(prefix="hopru_update_")
     tmp_exe = os.path.join(tmp_dir, exe_name)
