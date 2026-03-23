@@ -529,14 +529,14 @@ def load_module(path, parent_tabwidget):
     return tab_logic
 
 
-GITHUB_API_URL = "https://api.github.com/repos/Sky-pluh/Fleasion/releases/latest"
-GITHUB_RELEASE_URL = "https://github.com/Sky-pluh/Fleasion/releases/latest"
+GITHUB_API_URL = "https://api.github.com/repos/BLOCKCE/Hopr-Utilities/releases/latest"
+GITHUB_RELEASE_URL = "https://github.com/BLOCKCE/Hopr-Utilities/releases/latest"
 
 GITHUB_MODULES: dict[str, str] = {
-    "cache":        "https://github.com/Sky-pluh/Fleasion/releases/latest/download/cache.zip",
-    "subplace_tab": "https://github.com/Sky-pluh/Fleasion/releases/latest/download/subplace_tab.zip",
-    "randostuff":   "https://github.com/Sky-pluh/Fleasion/releases/latest/download/randostuff.zip",
-    "credits":      "https://github.com/Sky-pluh/Fleasion/releases/latest/download/credits.zip",
+    "cache":        "https://github.com/BLOCKCE/Hopr-Utilities/releases/latest/download/cache.zip",
+    "subplace_tab": "https://github.com/BLOCKCE/Hopr-Utilities/releases/latest/download/subplace_tab.zip",
+    "randostuff":   "https://github.com/BLOCKCE/Hopr-Utilities/releases/latest/download/randostuff.zip",
+    "credits":      "https://github.com/BLOCKCE/Hopr-Utilities/releases/latest/download/credits.zip",
 }
 
 _MODULE_ORDER = ["cache", "subplace_tab", "randostuff", "credits"]
