@@ -7,6 +7,8 @@ With it, you can:
 * Edit Caches
 * Find Caches
 * Rejoin reserved servers
+* Download private assets
+* Open multiple instances of roblox
 
 ## Installation
 1. Install the exe file
@@ -14,14 +16,18 @@ With it, you can:
 
 or
 
-1. Install the python file
-2. Run this in command prompt
+Build from source
+
 ```bash
-pip install -r requirements.txt
-```
-3. Run The script
-```bash
-python HoprU.py
+# Clone the repository
+git clone https://github.com/BLOCKCE/Hopr-Utilities.git
+cd Hopr-Utilities
+
+# Install dependencies with uv
+uv sync
+
+# Run the application
+uv run HoprU
 ```
 
 If you have any questions, want any features added or need help, join the official HoprU discord server https://discord.gg/J8QxfkUjdU or just ask in the utilities post in the RGC discord server (https://discord.gg/ASBxMYeBNn).
