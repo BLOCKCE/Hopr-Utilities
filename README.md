@@ -1,273 +1,48 @@
-# Fleasion
+# Hopr Utilities
+![GitHub Releases](https://img.shields.io/github/downloads/BLOCKCE/Hopr-Utilities/total.svg)
 
-A Windows application for intercepting and replacing Roblox game assets in real time. Fleasion runs a local proxy that sits between Roblox and its servers, letting you swap textures, audio, meshes, animations, and other assets before they reach the game client.
+This tool is a combination of all our previous tools.<br />
+With it, you can:
+* Join Subplaces
+* Edit Caches
+* Find Caches
+* Rejoin reserved servers
 
-To request help or request content, join our community <a href="https://discord.com/invite/pdtce585f6">Discord server!</a>
+## Installation
+1. Install the exe file
+2. Run it
 
-<a href="https://discord.gg/hXyhKehEZF">
-    <img src="https://invidget.switchblade.xyz/hXyhKehEZF" alt="Join our Discord server">
-</a>
+or
 
-## Installation & Building
-
-### Standalone Executable
-
-Download `Fleasion.exe` from the [Releases](https://github.com/qrhrqiohj/Fleasion/releases) page. No Python installation required.
-
-## Requirements for Building from Source
-
-- **Windows** (required &mdash; uses Windows-specific APIs)
-- **Python 3.14+**
-- [**uv**](https://docs.astral.sh/uv/) package manager
-
-### Building from Source
-
+1. Install the python file
+2. Run this in command prompt
 ```bash
-# Clone the repository
-git clone https://github.com/qrhrqiohj/Fleasion.git
-cd fleasion
-
-# Install dependencies with uv
-uv sync
-
-# Run the application
-uv run Fleasion
+pip install -r requirements.txt
 ```
-
-### Building a Standalone Executable
-
-To build a standalone executable, within the "Fleasion" folder:
-
+3. Run The script
 ```bash
-# Install PyInstaller
-uv add pyinstaller --dev
-
-# Build
-uv run pyinstaller Fleasion.spec
+python HoprU.py
 ```
 
-## System Tray
+If you have any questions, want any features added or need help, join the official HoprU discord server https://discord.gg/J8QxfkUjdU or just ask in the utilities post in the RGC discord server (https://discord.gg/ASBxMYeBNn).
+We will continue to update this until we think it doesn't require any more updates.
 
-Fleasion runs in the background as a system tray application (bottom-right corner of your screen). Right-click the tray icon to access:
+<details>
+<summary>Screenshot 1 – Cache Loader</summary>
+  
+<img width="791" height="692" alt="Screenshot 2026-03-23 225625" src="https://github.com/user-attachments/assets/d7489cd4-2557-4cfc-9ec2-63ac773f4edd" />
 
-- **Dashboard** &mdash; configure asset replacements
-- **Delete Cache** &mdash; manually clear cached assets
-- **Logs** &mdash; view real-time proxy logs
-- **About** &mdash; application information
-- **Settings** &mdash; theme (System/Light/Dark), auto-delete cache on exit, clear cache on launch, run on boot, and more
+<details>
+<summary>Screenshot 2 – Random stuff</summary>
 
-Left-click the tray icon to hide/unhide Fleasion window.
+<img width="792" height="692" alt="Screenshot 2026-03-23 225642" src="https://github.com/user-attachments/assets/f3136a7c-6d8d-4fad-96ce-a00957e4749d" />
 
-## Important
+</details>
 
-After applying any changes in the Dashboard, you must **clear your Roblox cache** (or restart Roblox) so assets get re-downloaded through the proxy. Fleasion can handle this automatically:
+<details>
+<summary>Screenshot 3 – Subplace Joiner</summary>
 
-- **Clear Cache on Launch** (on by default) &mdash; terminates Roblox and deletes `rbx-storage.db` when the proxy starts
-- **Auto Delete Cache on Exit** (on by default) &mdash; deletes the cache database when Roblox closes
-- Manual cache deletion is available from the tray menu
+<img width="783" height="691" alt="Screenshot 2026-03-23 225638" src="https://github.com/user-attachments/assets/29159d36-2740-48ba-a63f-7e6652dd0334" />
 
-## How It Works
+</details>
 
-Fleasion runs a lightweight custom asyncio HTTPS proxy on `127.0.0.1:443`. On startup it redirects `assetdelivery.roblox.com` and `fts.rbxcdn.com` to localhost via the system hosts file, installs a locally-generated CA certificate into Roblox's SSL directory so the TLS handshake succeeds, and intercepts all asset traffic. When Roblox requests assets from its CDN, Fleasion can:
-
-- **Replace** assets by ID &mdash; swap one asset for another (different texture, audio, etc.)
-- **Remove** assets &mdash; strip textures from the batch request entirely
-- **Redirect** to CDN URLs or local files &mdash; serve your own content
-- **Cache** original assets &mdash; browse, preview, and export everything Roblox downloads
-
-All interception happens locally on your machine. The proxy requires administrator privileges to write the hosts file and bind port 443 &mdash; Fleasion will prompt for UAC elevation on first launch.
-
-**VPN compatibility:** Because interception uses the system's hosts file (application layer), it should be compatible with most VPN software, as long as it respects your Windows hosts file.
-
-## Features
-
-### Asset Replacement
-- Configure replacement rules through the Dashboard GUI
-- Replace assets by ID, redirect to external URLs, or serve local files
-- Multiple configuration profiles &mdash; switch between different setups
-- Import/export configurations as JSON
-- Community preset support via PreJsons
-- **Creator name column** in configuration list (off by default)
-- **Asset name display** next to preview button
-
-### Cache Scraper
-
-The cache scraper is a live interception system that captures every asset Roblox downloads during gameplay. Enable it from the Dashboard and it works automatically in the background while you play.
-
-**Two-stage interception:**
-
-1. **Asset tracking** &mdash; intercepts batch requests to `assetdelivery.roblox.com/v1/assets/batch` to discover asset IDs, their CDN locations, and asset types before anything is downloaded
-2. **CDN capture** &mdash; intercepts the actual downloads from `fts.rbxcdn.com`, caching the raw content with full metadata (URL, content type, hash, size, timestamp)
-
-**Features:**
-
-- **Column filtering** &mdash; right-click column headers to show/hide categories (Creator name and Roblox CDN link off by default)
-- **Resizable columns** with saved preferences in settings
-- **Sortable columns** with persistent adjustment storage
-
-**Automatic format conversion:**
-
-- **KTX textures** (Images, Decals) &mdash; automatically fetches the converted PNG version from the asset delivery API so you get usable image files instead of raw KTX data
-- **TexturePacks** &mdash; fetches the XML manifest that maps Color, Normal, Metalness, and Roughness texture IDs, then resolves each individual texture
-
-**Performance:**
-
-- All API conversion calls run in a background thread pool (4 workers) so the proxy never blocks waiting on network requests
-- Connection pooling via persistent HTTP sessions reduces overhead on repeated API calls
-- O(1) URL-to-asset lookups using hash maps instead of scanning every tracked asset
-
-**What gets cached:**
-
-Every asset type Roblox uses &mdash; images, decals, audio, meshes, animations, shirts, pants, hats, faces, accessories (80+ types). Each asset is stored with its type, original URL, content hash, file size, and capture timestamp.
-
-### 3D Viewers & Preview
-
-- **Mesh Viewer** (OpenGL-based):
-  - 3D mesh preview with orbit and FPS camera modes
-  - Wireframe and grid visualization (grid on by default for new users)
-  - Optimized rendering with display list caching
-  - Vertex color support
-  - Auto-rotation capability
-
-- **Animation Viewer**:
-  - Live 3D animation playback with R15/R6 rig support
-  - **Freecam movement** for better viewing angles
-  - **Timescale controls** for slowing down or speeding up animations
-  - Grid visualization (on by default)
-
-- **Asset Conversion Support**:
-  - **Mesh to CSG** &mdash; auto-convert `.mesh` files to `.obj` before injecting as CSG
-  - **CSG to Mesh** &mdash; auto-convert CSG models to `.obj` before mesh replacement
-  - **CSG to CSG** &mdash; replace CSG models directly via CDN links
-  - **CDN OBJ Support** &mdash; download and convert OBJ files from CDN links (Discord, Cloudflare, etc.)
-
-### Cache Viewer
-- Browse all intercepted assets organized by type (80+ Roblox asset types)
-- Search and filter by ID, name, type, hash, or URL
-- **Live preview** for images, meshes (3D viewer), audio (playback), animations (3D rig), texture packs, and Jsons.
-- Asset name resolution via Roblox API
-- Export assets in multiple formats (converted, binary, raw)
-- Copy converted files directly to clipboard
-- **Category filtering** with clickable column header menu
-
-## Usage
-
-1. **Launch Fleasion** &mdash; the application starts in the system tray and automatically begins the proxy
-2. **Open the Dashboard** &mdash; right-click the tray icon and select "Dashboard"
-3. **Configure replacements** &mdash; add asset IDs you want to replace and specify replacement assets
-4. **Launch Roblox** &mdash; the game's traffic will route through the proxy
-5. **Clear cache** when changing replacements so Roblox re-downloads assets through the proxy
-
-### First Launch
-
-On first launch, Fleasion will:
-- Generate a local CA certificate and install it into Roblox's SSL directory
-- Prompt for administrator privileges (required to modify the hosts file and bind port 443)
-- Show a welcome dialog explaining how the proxy works
-- Open the Dashboard automatically
-
-### Run on Boot
-
-Fleasion can be configured to launch automatically at Windows logon via **Settings → Run on Boot**. This creates a Windows Task Scheduler task with `RunLevel=HighestAvailable`, so the proxy starts elevated without a UAC prompt on every boot. The task updates itself automatically if the installation path or launch method changes.
-
-## Project Structure
-
-```
-src/Fleasion/
-├── app.py                          # Application entrypoint, UAC elevation, lifecycle
-├── tray.py                         # System tray icon and menu
-├── config/
-│   └── manager.py                  # Settings persistence and config management
-├── proxy/
-│   ├── master.py                   # Proxy orchestration, hosts file management, cert setup
-│   ├── server.py                   # Asyncio TLS proxy server (direct HTTPS interception)
-│   └── addons/
-│       ├── cache_scraper.py        # Asset interception and caching addon
-│       └── texture_stripper.py     # Asset replacement and texture removal addon
-├── cache/
-│   ├── cache_manager.py            # Asset storage, indexing, and export
-│   ├── cache_viewer.py             # Cache browsing UI with search and preview
-│   ├── cache_json_viewer.py        # Embedded JSON viewer for cache entries
-│   ├── animation_viewer.py         # 3D animation preview with R15/R6 rigs
-│   ├── audio_player.py             # Audio playback widget
-│   ├── obj_viewer.py               # 3D mesh viewer (OpenGL) with orbit/FPS camera
-│   ├── mesh_processing.py          # Mesh format conversion (Roblox mesh to OBJ)
-│   ├── rbxm_parser.py              # Roblox binary model file parser
-│   └── tools/
-│       ├── solidmodel_converter/
-│       │   ├── converter.py        # RBXM deserializer entry point
-│       │   ├── obj_to_mesh.py      # OBJ to Roblox V2.00 mesh format converter
-│       │   ├── obj_to_csg.py       # OBJ to Roblox CSGMDL converter
-│       │   ├── csg_mesh.py         # CSGMDL serialization utilities
-│       │   ├── mesh_intermediary.py# .mesh/.bin to OBJ intermediary conversion
-│       │   └── rbxm/               # RBXM binary format reader/writer
-│       │       ├── binary_reader.py
-│       │       ├── binary_writer.py
-│       │       ├── deserializer.py
-│       │       ├── serializer.py
-│       │       ├── types.py
-│       │       └── xml_writer.py
-│       └── animpreview/            # Animation preview assets (R15/R6 OBJ models and rigs)
-├── gui/
-│   ├── replacer_config.py          # Main Dashboard window with profile management
-│   ├── json_viewer.py              # JSON tree viewer with search and asset preview
-│   ├── theme.py                    # Theme management (System/Light/Dark)
-│   ├── about.py                    # About dialog
-│   ├── logs.py                     # Real-time log viewer
-│   └── delete_cache.py             # Cache deletion window
-├── prejsons/
-│   └── downloader.py               # Community preset downloader
-└── utils/
-    ├── paths.py                    # Application paths and constants
-    ├── certs.py                    # Local CA and leaf certificate generation
-    ├── autostart.py                # Windows Task Scheduler run-on-boot management
-    ├── logging.py                  # Thread-safe log buffer
-    ├── threading.py                # Threading utilities
-    ├── updater.py                  # Update checker
-    └── windows.py                  # Windows-specific operations (process management, cache deletion)
-```
-
-## Configuration
-
-Settings are stored in `%LocalAppData%\FleasionNT\`:
-
-| File / Directory | Purpose |
-|---|---|
-| `settings.json` | Application settings |
-| `configs/` | Replacement configuration profiles (JSON) |
-| `Cache/` | Cached asset files and index |
-| `Exports/` | Exported assets |
-| `PreJsons/` | Community preset data |
-| `proxy_ca/` | Generated CA certificate and per-host leaf certificates |
-| `Temp/ConvertedMeshes/` | Temporary directory for OBJ/mesh conversions |
-
-## Dependencies
-
-| Package | Purpose |
-|---|---|
-| cryptography | Local CA and TLS certificate generation |
-| PyQt6 | GUI framework |
-| PyOpenGL | 3D mesh and animation rendering |
-| DracoPy | Mesh decompression (Google Draco) |
-| Pillow | Image processing |
-| NumPy | Numerical operations |
-| pywin32 | Windows API access |
-| requests | HTTP client for API calls |
-| sounddevice + soundfile | Audio playback |
-| lz4 | Compression support |
-| orjson | Fast JSON parsing |
-
-## Community
-
-- **Discord**: [discord.gg/hXyhKehEZF](https://discord.gg/hXyhKehEZF)
-- **Donate**: [ko-fi.com/fleasion](https://ko-fi.com/fleasion)
-
-## Credits
-
-- **@8ar__**, **@dis_spencer** &mdash; code
-- **@1_v** (Sky), **@Blockce**, **@0100152000022000** (Sky 2), **@emk530**, **@Yeha.** &mdash; logic and contributions
-- Donators &mdash; for keeping the passion going
-
-## License
-
-This project is provided as-is for educational and personal use.

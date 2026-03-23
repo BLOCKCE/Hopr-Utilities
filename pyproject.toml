@@ -1,6 +1,6 @@
 [project]
-name = "Fleasion"
-version = "0.1.0"
+name = "HoprU"
+version = "1.9"
 description = "A Windows desktop application built with PySide6"
 readme = "README.md"
 license = { file = "LICENSE.txt" }
@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.scripts]
-fleasion = "fleasion:main"
+HoprU = "hopru:main"
 
 [project.optional-dependencies]
 build = [
